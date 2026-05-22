@@ -1,0 +1,6 @@
+# 可选：在 default / demo 之上再叠一层（tts.pb_face_bundle_file 指向本文件）
+# 例：先试 demo，再叠加更快眨眼
+metadata:
+  blink:
+    open_ms: 900
+    close_ms: 120

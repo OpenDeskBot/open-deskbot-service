@@ -1,0 +1,13 @@
+# 与 pyproject.toml [project.dependencies] 同步；torch 仍由 start.sh 单独安装
+funasr==1.2.7
+openai==2.8.1
+websockets==14.2
+PyYAML==6.0.2
+numpy==1.26.4
+opuslib_next==1.1.5
+webrtcvad==2.0.10
+setuptools<81
+Flask==3.1.1
+mediapipe==0.10.33
+Pillow>=10.3.0
+opencv-contrib-python>=4.10,<4.11

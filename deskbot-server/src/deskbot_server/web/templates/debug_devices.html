@@ -1,0 +1,1899 @@
+{% extends "base.html" %}
+{% block page_title %}设备调试 · Deskbot Server{% endblock %}
+{% block extra_head %}
+  {# 必须在 Vue 与主脚本之前注入：否则 data() 读到 undefined，会一直用 127.0.0.1 回退 #}
+  <script>
+    window.__DEVICE_PIPELINE_WS_BASE__ = {{ device_pipeline_ws_base|tojson }};
+    window.__CAMERA_VIEW_WS_BASE__ = {{ camera_view_ws_base|tojson }};
+    window.__DESKBOT_HTTP_BASE__ = {{ deskbot_http_base|tojson }};
+  </script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+{% endblock %}
+{% block content %}
+  <h1>设备调试</h1>
+  <p class="page-sub muted">选择在线设备，查看摄像头、下发舵机/场景，并订阅 <code>device_pipeline</code> 流水线。</p>
+  {% raw %}
+  <div id="app">
+    <div class="card">
+      <h3 style="margin-top:0;">设备选择</h3>
+      <div class="dv-toolbar">
+        <label class="t-label">当前设备</label>
+        <select v-model="selected" class="dv-select">
+          <option value="">全部设备（{{ devices.length }}）</option>
+          <option v-for="d in devices" :key="d.device_id" :value="d.device_id">
+            {{ d.device_id }}
+            <span>
+              — {{ d.online ? '在线' : '离线' }}
+              ｜ {{ formatChannels(d.channels) || '无通道' }}
+              ｜ 事件 {{ d.event_count || 0 }}
+            </span>
+          </option>
+        </select>
+        <button type="button" @click="refreshDevices" class="dv-btn">刷新列表</button>
+        <label class="cv-voice-auto-lbl" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;">
+          <input type="checkbox"
+                 :checked="cvVoiceAutoReply"
+                 :disabled="cvVoiceAutoReplySaving"
+                 @change="cvOnVoiceAutoReplyChange($event)" />
+          <span>自动应答（关=不触发 LLM/TTS）</span>
+        </label>
+        <span v-if="cvVoiceAutoReplySaving" class="muted sm">保存中…</span>
+        <span class="dv-sp"></span>
+        <span class="muted sm">
+          订阅：<span :class="['dv-status', dpConnected ? 'ok' : 'bad']">{{ dpStatus }}</span>
+        </span>
+      </div>
+      <p v-if="deviceListError" class="dv-err">{{ deviceListError }}</p>
+      <p v-if="cvVoiceAutoReplyErr" class="dv-err">{{ cvVoiceAutoReplyErr }}</p>
+      <p class="muted sm" v-if="selectedDeviceDetail">
+        {{ selectedDeviceDetail.device_id }} · {{ formatChannels(selectedDeviceDetail.channels) || '无通道' }}
+        · 最近 {{ selectedDeviceDetail.last_seen || '—' }}
+      </p>
+    </div>
+
+    <div class="dv-main-grid">
+    <div class="dv-left-col">
+    <div class="card dv-tts-card">
+      <h3 style="margin-top:0;">TTS 下发</h3>
+      <p class="doc muted">输入文字，经音素 TTS 合成后以 pb 下发给所选设备；点击历史记录可重复下发。</p>
+      <div class="dv-tts-toolbar">
+        <input type="text" class="dv-tts-input" v-model="ttsInputText"
+               placeholder="输入要播报的文字…"
+               :disabled="ttsSending"
+               @keydown.enter.prevent="ttsSendNew" />
+        <button type="button" class="dv-btn" :disabled="!ttsCanSend" @click="ttsSendNew">
+          {{ ttsSending ? '下发中…' : '下发' }}
+        </button>
+      </div>
+      <p v-if="!selected" class="dv-err sm">请先选择具体设备</p>
+      <p v-if="ttsSendError" class="dv-err sm">{{ ttsSendError }}</p>
+      <div class="dv-tts-table-wrap">
+        <table class="dv-tts-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>文本</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!ttsHistory.length">
+              <td colspan="3" class="dv-tts-empty">暂无下发记录</td>
+            </tr>
+            <tr v-for="row in ttsHistory" :key="row.id"
+                class="dv-tts-row"
+                :title="row.status === 'sending' ? '下发中…' : '点击重复下发'"
+                @click="ttsResend(row)">
+              <td class="mono sm">{{ row.sentAt }}</td>
+              <td><div class="t dv-tts-text">{{ row.text }}</div></td>
+              <td class="sm">
+                <span v-if="row.status === 'ok'" class="dp-status ok">成功</span>
+                <span v-else-if="row.status === 'sending'" class="dp-status running">下发中</span>
+                <span v-else class="dp-status bad" :title="row.error || ''">失败</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card dv-servo-card">
+      <h3 style="margin-top:0;">舵机手动控制</h3>
+      <p class="doc muted">方向键下发相对 <code>pb_single</code>；右侧 3×3 为绝对位置（xm=ym=0），中心 90/90。</p>
+      <div class="servo-manual-toolbar">
+        <label class="t-label">步进（度）</label>
+        <input type="number" class="servo-manual-num" min="1" max="90" step="1"
+               v-model.number="manualServoDeg" @change="manualClampDeg" />
+        <label class="t-label">xm / ym</label>
+        <select v-model.number="manualServoXm" class="dv-select" style="min-width:140px;">
+          <option :value="1">相对</option>
+          <option :value="0">绝对</option>
+        </select>
+        <label class="t-label">时长 ms</label>
+        <input type="number" class="servo-manual-num" min="50" max="10000" step="50"
+               v-model.number="manualServoMs" @change="manualClampMs" />
+        <label class="t-label">action</label>
+        <select v-model="manualServoAction" class="dv-select" style="min-width:120px;">
+          <option value="opportunistic">顺便</option>
+          <option value="replace">打断</option>
+          <option value="append">追加</option>
+        </select>
+      </div>
+      <div class="servo-dpad-wrap">
+        <div class="servo-dpad">
+          <span class="servo-dpad-sp"></span>
+          <button type="button" class="servo-dpad-btn" title="上（pitch +）"
+                  :disabled="!manualCanSendServo || manualServoSending"
+                  @click="manualSendServoDir('up')">▲</button>
+          <span class="servo-dpad-sp"></span>
+          <button type="button" class="servo-dpad-btn" title="左（yaw −）"
+                  :disabled="!manualCanSendServo || manualServoSending"
+                  @click="manualSendServoDir('left')">◀</button>
+          <button type="button" class="servo-dpad-btn servo-dpad-mid" disabled aria-hidden="true">·</button>
+          <button type="button" class="servo-dpad-btn" title="右（yaw +）"
+                  :disabled="!manualCanSendServo || manualServoSending"
+                  @click="manualSendServoDir('right')">▶</button>
+          <span class="servo-dpad-sp"></span>
+          <button type="button" class="servo-dpad-btn" title="下（pitch −）"
+                  :disabled="!manualCanSendServo || manualServoSending"
+                  @click="manualSendServoDir('down')">▼</button>
+          <span class="servo-dpad-sp"></span>
+        </div>
+        <div class="servo-abs-wrap">
+          <p class="muted sm servo-abs-title">绝对位置</p>
+          <div class="servo-abs-grid">
+            <button v-for="(pos, idx) in manualAbsServoPresets" :key="idx"
+                    type="button" class="servo-abs-btn"
+                    :title="`绝对 x=${pos.x} y=${pos.y}`"
+                    :disabled="!manualCanSendServo || manualServoSending"
+                    @click="manualSendServoAbs(pos.x, pos.y)">
+              {{ pos.x }}/{{ pos.y }}
+            </button>
+          </div>
+        </div>
+        <div class="servo-manual-side">
+          <p class="muted sm mono servo-manual-preview">{{ manualServoPreview }}</p>
+          <p v-if="!selected" class="dv-err sm">请先选择具体设备</p>
+          <p v-else-if="manualServoStatus" class="sm" :class="{ 'dv-err': manualServoStatusErr }">{{ manualServoStatus }}</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card dv-camera-card">
+      <div class="cv-card-head">
+        <h3 class="cv-card-title">摄像头</h3>
+        <div class="cv-card-head-bar">
+          <button type="button" class="dv-btn cv-toggle sm" :class="{ on: cvServoAutoMode === 'follow' }"
+                  title="有人脸即按画面角绝对定位"
+                  @click="cvToggleAutoMode('follow')">启用跟随人脸</button>
+          <button type="button" class="dv-btn cv-toggle sm" :class="{ on: cvServoAutoMode === 'gaze' }"
+                  title="有人脸且正脸(is_frontal)才自动下发舵机，否则不发"
+                  @click="cvToggleAutoMode('gaze')">启用注视感知</button>
+          <p class="cv-servo-preview muted sm mono">{{ cvServoPreviewLine }}</p>
+        </div>
+      </div>
+      <p class="cv-stream-stats muted sm mono">{{ cvStreamStatsLine }}</p>
+      <p class="doc muted cv-legend-line">
+        绿框=有人脸。
+        <span class="cv-legend"><span class="dot" style="background:#0a84ff"></span>眼角</span>
+        <span class="cv-legend"><span class="dot" style="background:#ffd60a"></span>瞳孔</span>
+        <span class="cv-legend"><span class="dot" style="background:#30d158"></span>鼻尖</span>
+        <span class="cv-legend"><span class="dot" style="background:#ff453a"></span>嘴角</span>
+      </p>
+      <div class="cv-main">
+        <div class="cv-img-wrap" :class="{ 'with-face': cvLastDetected === true, 'no-face': cvLastDetected === false }">
+          <img v-if="cvImgUrl" :src="cvImgUrl" class="cv-img" alt="camera frame" />
+          <div v-else class="cv-img-placeholder">等待 ESP32 推图…</div>
+          <!-- 不用 SVG viewBox（Vue in-DOM 模板里 viewBox/preserveAspectRatio
+               大小写处理有坑，且即便修对了 SVG 默认 contain 留黑边的逻辑很难和
+               <img> object-fit:contain 完全对齐）。改成"手动 scale + offset"：
+               把服务端给的图像坐标系（image_w × image_h）映射到 wrap 像素
+               坐标系（cvDispW × cvDispH），与 <img> 在 contain 模式下显示出
+               的几何位置完全一致 → 标签必定贴合实际五官。 -->
+          <svg v-if="cvLandmarks.length" class="cv-overlay">
+            <circle v-for="p in cvLandmarks" :key="p.name"
+                    :cx="p.x * cvScaleX + cvOffsetX"
+                    :cy="p.y * cvScaleY + cvOffsetY"
+                    :r="cvDotRadius(p.name)"
+                    :fill="cvDotColor(p.name)"
+                    stroke="rgba(0,0,0,0.9)" :stroke-width="cvStrokeWidth" />
+          </svg>
+          <div class="cv-img-badge" v-if="cvLastDetected != null"
+               :class="cvLastDetected ? 'ok' : 'bad'">
+            {{ cvLastDetected ? '检测到人脸' : '未检测到人脸' }}
+          </div>
+          <div v-if="cvLastDetected && cvFpFrontalScore != null"
+               class="cv-img-badge cv-img-badge-fr"
+               :class="cvFpIsFrontal ? 'ok' : 'bad'">
+            {{ cvFpIsFrontal ? '正脸' : '非正脸' }} · {{ cvFpFrontalScore.toFixed(2) }}
+          </div>
+          <!-- 右上角：面向角度 yaw（基于 9 点 landmarks 估算）。
+               正对 0°，向自身右负、向自身左正；|yaw|<15° 视为正脸标绿。 -->
+          <div v-if="cvLastDetected && cvYawDeg != null"
+               class="cv-img-badge cv-img-badge-r"
+               :class="Math.abs(cvYawDeg) < 15 ? 'ok' : 'bad'">
+            yaw {{ cvYawDegLabel }}
+          </div>
+          <!-- 右下角：pitch（俯仰）。抬头正、低头负；|pitch|<15° 标绿。 -->
+          <div v-if="cvLastDetected && cvPitchDeg != null"
+               class="cv-img-badge cv-img-badge-rb"
+               :class="Math.abs(cvPitchDeg) < 15 ? 'ok' : 'bad'">
+            pitch {{ cvPitchDegLabel }}
+          </div>
+        </div>
+        <div class="cv-meta">
+          <div class="fp-meta-row"><span class="k">订阅</span><span class="v sm" :class="['dv-status', cvConnected ? 'ok' : 'bad']">{{ cvStatus }}</span></div>
+          <div class="fp-meta-row"><span class="k">device_id</span><span class="v mono">{{ cvLastDevice || '—' }}</span></div>
+          <div class="fp-meta-row"><span class="k">yaw</span><span class="v mono sm">{{ cvYawDegLabel || '—' }}</span></div>
+          <div class="fp-meta-row"><span class="k">pitch</span><span class="v mono sm">{{ cvPitchDegLabel || '—' }}</span></div>
+          <div class="fp-meta-row"><span class="k">居中 yaw</span><span class="v mono sm">{{ cvCenterYawLabel || '—' }}</span></div>
+          <div class="fp-meta-row"><span class="k">居中 pitch</span><span class="v mono sm">{{ cvCenterPitchLabel || '—' }}</span></div>
+          <div class="fp-meta-row"><span class="k">虹膜 L</span><span class="v mono sm">{{ cvIrisLeftLabel || '—' }}</span></div>
+          <div class="fp-meta-row"><span class="k">虹膜 R</span><span class="v mono sm">{{ cvIrisRightLabel || '—' }}</span></div>
+          <div class="fp-meta-row"><span class="k">正脸分数</span><span class="v mono sm">{{ cvFpFrontalScore != null ? cvFpFrontalScore.toFixed(3) : '—' }}</span></div>
+          <div class="fp-meta-row"><span class="k">是否正脸</span><span class="v sm">
+            <span v-if="cvFpFrontalScore == null">—</span>
+            <span v-else :class="['dp-status', cvFpIsFrontal ? 'ok' : 'bad']">{{ cvFpIsFrontal ? '是' : '否' }}</span>
+          </span></div>
+          <div class="fp-meta-row" v-if="cvFpConfidence != null"><span class="k">置信度</span><span class="v mono sm">{{ cvFpConfidence.toFixed(3) }}</span></div>
+          <table class="fp-pts">
+            <thead><tr><th>5 点</th><th>x</th><th>y</th></tr></thead>
+            <tbody>
+              <tr v-for="p in cvFpPointsFull" :key="p.name">
+                <td><span class="fp-dot" :style="{ background: p.color }"></span>{{ faceLabel(p.name) }}</td>
+                <td class="mono">{{ p.x != null ? p.x.toFixed(1) : '—' }}</td>
+                <td class="mono">{{ p.y != null ? p.y.toFixed(1) : '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="cv-calib">
+            <p v-if="cvServoAutoMode && cvServoAutoDiag" class="muted sm mono cv-automode-diag">{{ cvServoAutoDiag }}</p>
+            <div class="cv-calib-hint muted sm" :class="{ 'dv-err': cvServoStatusErr }">
+              <p v-if="cvServoStatus">{{ cvServoStatus }}</p>
+              <p v-else-if="selected && cvConnected && cvLastDetected && cvLastDevice && cvLastDevice !== selected" class="dv-err">
+                画面设备 {{ cvLastDevice }} 与所选不一致
+              </p>
+              <p v-else-if="selected && cvConnected && cvLastDetected === false">未检测到人脸</p>
+              <p v-else>&nbsp;</p>
+            </div>
+          </div>
+
+          <p v-if="cvError" class="dv-err">{{ cvError }}</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card cv-scenes-card">
+      <h3 style="margin-top:0;">场景</h3>
+      <p class="doc muted sm">输入文字后点场景：有文字则先 TTS 再播该场景（同一条 pb 链）；无文字则仅下发场景。</p>
+      <div class="cv-scenes-toolbar">
+        <input type="text" class="cv-scenes-input" v-model="ttsInputText"
+               placeholder="可选：作为 TTS 播报内容…"
+               :disabled="cvSceneActionBusy"
+               @keydown.enter.prevent="cvSceneSendTextOnly" />
+        <button type="button" class="dv-btn sm" :disabled="!ttsCanSend || cvSceneActionBusy"
+                @click="cvSceneSendTextOnly">
+          {{ ttsSending ? 'TTS 下发中…' : '仅 TTS' }}
+        </button>
+        <button type="button" class="dv-btn secondary sm" :disabled="cvSceneActionBusy"
+                @click="refreshPbScenes">刷新场景</button>
+      </div>
+      <div class="cv-scenes-btns">
+        <template v-if="pbSceneKeys.length">
+          <button v-for="sc in pbSceneKeys" :key="sc" type="button" class="dv-btn sm"
+                  :disabled="!cvCanSendPbScene || cvSceneActionBusy"
+                  @click="cvSendSceneAction(sc)">{{ sc }}</button>
+        </template>
+        <span v-else class="muted sm">{{ pbScenesError || '无可用场景' }}</span>
+      </div>
+      <p v-if="cvSceneActionStatus" class="sm mono cv-scene-action-status"
+         :class="{ 'dv-err': cvSceneActionStatusErr }">{{ cvSceneActionStatus }}</p>
+    </div>
+    </div>
+
+    <div class="dv-right-col">
+    <div class="card dv-pipeline-card">
+      <h3 style="margin-top:0;">流水线</h3>
+      <p class="doc muted">按 <code>request_id</code> 合并 ASR/LLM/TTS 阶段，最多 {{ dpMaxEvents }} 行。</p>
+      <div class="dp-toolbar">
+        <button type="button" @click="dpClear" class="dv-btn">清空表格</button>
+        <span class="muted sm">
+          {{ dpEvents.length }} 条；最后事件：{{ dpLastRecv || '—' }}
+        </span>
+      </div>
+      <p v-if="dpError" class="fp-err">{{ dpError }}</p>
+      <div class="table-wrap">
+        <table class="dp-table">
+          <thead>
+            <tr>
+              <th>request_id</th>
+              <th>收到时间</th>
+              <th>ASR 耗时</th>
+              <th>ASR 文本</th>
+              <th>LLM 耗时</th>
+              <th>LLM 返回</th>
+              <th>TTS 耗时</th>
+              <th>TTS 文本</th>
+              <th>状态</th>
+              <th>总耗时</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!dpEvents.length">
+              <td colspan="10" class="dp-empty">
+                {{ selected ? '暂无事件，请设备说话触发一轮对话' : '选择设备查看流水线' }}
+              </td>
+            </tr>
+            <tr v-for="r in dpEvents" :key="r.request_id || r._seq">
+              <td class="mono sm">{{ r.request_id || '—' }}</td>
+              <td class="mono sm">{{ dpFormatTime(r) }}</td>
+              <td class="mono">{{ dpMs(r.asr_ms) }}</td>
+              <td><div class="t">{{ r.asr_text || '—' }}</div></td>
+              <td class="mono">{{ dpMs(r.llm_ms) }}</td>
+              <td><div class="t">{{ r.llm_text || '—' }}</div></td>
+              <td class="mono">{{ dpMs(r.tts_ms) }}</td>
+              <td><div class="t">{{ r.tts_text || '—' }}</div></td>
+              <td>
+                <span :class="['dp-status', dpStatusClass(r)]">{{ dpStatusLabel(r) }}</span>
+                <div v-if="r.error" class="err sm">{{ r.error }}</div>
+              </td>
+              <td class="mono">{{ dpMs(r.e2e_ms) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    </div>
+    </div>
+  </div>
+  <style>
+    .page-sub { margin: 0 0 16px; font-size: 14px; }
+
+    .dv-main-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+    .dv-left-col,
+    .dv-right-col {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-width: 0;
+    }
+    .dv-servo-card,
+    .dv-camera-card,
+    .dv-pipeline-card { margin-bottom: 0; }
+    .dv-tts-card { margin-bottom: 0; }
+    .dv-tts-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 10px; }
+    .dv-tts-input {
+      flex: 1;
+      min-width: 180px;
+      padding: 8px 10px;
+      border: 1px solid #c7c7cc;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .dv-tts-table-wrap {
+      max-height: 11.75rem;
+      overflow-y: auto;
+      border: 1px solid #e5e5ea;
+      border-radius: 6px;
+    }
+    .dv-tts-table { margin: 0; font-size: 13px; }
+    .dv-tts-table th { position: sticky; top: 0; z-index: 1; background: #f5f5f7; }
+    .dv-tts-table td { padding: 7px 8px; vertical-align: top; }
+    .dv-tts-empty { text-align: center; color: #6e6e73; padding: 14px; }
+    .dv-tts-row { cursor: pointer; }
+    .dv-tts-row:hover { background: #f5f5f7; }
+    .dv-tts-text { max-width: 100%; word-break: break-word; line-height: 1.35; }
+    .dv-pipeline-card {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 480px;
+    }
+    .dv-pipeline-card .dp-toolbar { flex-shrink: 0; }
+    .dv-pipeline-card .table-wrap {
+      flex: 1;
+      min-height: 240px;
+      overflow: auto;
+    }
+    @media (max-width: 1100px) {
+      .dv-main-grid { grid-template-columns: 1fr; }
+      .dv-pipeline-card { min-height: 360px; }
+    }
+    .doc { margin: 4px 0 10px; font-size: 13px; line-height: 1.4; }
+    .cv-card-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px 14px;
+      margin-bottom: 6px;
+    }
+    .cv-card-title { margin: 0; font-size: 1.17em; flex-shrink: 0; }
+    .cv-stream-stats { margin: 0 0 8px; line-height: 1.4; }
+    .cv-card-head-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      flex: 1;
+      min-width: 0;
+    }
+    .cv-card-head-bar .cv-servo-preview {
+      margin: 0;
+      flex: 1;
+      min-width: 10rem;
+    }
+    .dv-btn.sm { padding: 5px 10px; font-size: 12px; }
+    .cv-legend-line { margin-bottom: 8px; }
+    .muted { color: #6e6e73; }
+    .ok { color: #1a7f37; }
+    .bad { color: #b42318; }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border: 1px solid #d2d2d7; padding: 8px; vertical-align: top; }
+    th { background: #f5f5f7; text-align: left; white-space: nowrap; }
+    .t { max-width: 220px; word-break: break-word; line-height: 1.35; }
+    .mono { font-family: ui-monospace, monospace; }
+    .sm { font-size: 12px; }
+    .err { color: #b42318; }
+
+    .dv-toolbar, .dp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 12px; }
+    .t-label { font-size: 13px; color: #6e6e73; }
+    .dv-select { padding: 7px 10px; border: 1px solid #c7c7cc; border-radius: 6px; background: #fff; min-width: 280px; font-size: 13px; }
+    .dv-btn { padding: 7px 14px; border-radius: 6px; border: 1px solid #c7c7cc; background: #fff; cursor: pointer; }
+    .dv-btn:hover:not(:disabled) { background: #f5f5f7; }
+    .dv-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .cv-calib { margin: 8px 0 4px 0; padding: 8px 0; border-top: 1px dashed #d2d2d7; }
+    /* 固定提示区高度，避免 v-if 切换时整块 meta 上下跳动 */
+    .cv-calib-hint { min-height: 2.75em; }
+    .cv-calib-hint p { margin: 4px 0 0; line-height: 1.35; }
+    .cv-servo-preview { line-height: 1.4; }
+    .cv-servo-preview-sep { color: #c7c7cc; margin: 0 0.25em; }
+    .dv-btn.cv-toggle.on { background: #e8f4ea; border-color: #1a7f37; color: #14532a; font-weight: 600; }
+    .cv-automode-doc { margin: 6px 0 0; line-height: 1.45; max-width: 52em; }
+    .cv-automode-diag { margin: 6px 0 0; padding: 6px 8px; background: #f5f5f7; border-radius: 6px; border: 1px solid #e5e5ea; font-size: 12px; line-height: 1.4; word-break: break-word; }
+    .cv-scenes-card { margin-top: 0; }
+    .cv-scenes-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0 10px;
+    }
+    .cv-scenes-input {
+      flex: 1;
+      min-width: 12rem;
+      padding: 7px 10px;
+      border: 1px solid #c7c7cc;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    .cv-scenes-btns {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .cv-scene-action-status { margin: 8px 0 0; line-height: 1.4; }
+    .dv-sp { flex: 1; }
+    .dv-status.ok { color: #1a7f37; font-weight: 600; }
+    .dv-status.bad { color: #b42318; font-weight: 600; }
+    .dv-err { color: #b42318; font-size: 13px; margin: 4px 0 0; }
+
+    .fp-meta-row { display: flex; gap: 10px; padding: 3px 0; font-size: 13px; border-bottom: 1px dashed #eee; }
+    .fp-meta-row .k { color: #6e6e73; min-width: 72px; }
+    .fp-meta-row .v { flex: 1; }
+    .fp-pts { width: 100%; margin-top: 10px; }
+    .fp-pts th, .fp-pts td { padding: 6px 8px; font-size: 12px; border: 1px solid #e5e5ea; }
+    .fp-pts th { background: #fafafa; }
+    .fp-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; box-shadow: 0 0 0 1px rgba(0,0,0,0.15); }
+
+    .dp-table { margin-top: 4px; }
+    .dp-table td { vertical-align: top; }
+    .dp-table th { white-space: nowrap; }
+    .dp-empty { text-align: center; color: #6e6e73; padding: 20px; }
+    .dp-status.ok { color: #1a7f37; font-weight: 600; }
+    .dp-status.bad { color: #b42318; font-weight: 600; }
+    .dp-status.running { color: #0071e3; font-weight: 600; }
+
+    .cv-main { display: flex; flex-wrap: nowrap; gap: 12px; align-items: flex-start; min-width: 0; }
+    /* 显示尺寸为原 640×480 的 2/3（427×320）；右侧并排 meta/表格。 */
+    .cv-img-wrap {
+      position: relative;
+      flex-shrink: 0;
+      width: 427px;
+      height: 320px;
+      border: 2px solid #c7c7cc;
+      border-radius: 8px;
+      background: #111;
+      overflow: hidden;
+    }
+    .cv-img-wrap.with-face { border-color: #1a7f37; }
+    .cv-img-wrap.no-face { border-color: #b42318; }
+    /* 像素化放大，避免 4 倍面积下浏览器把低分辨率 JPEG 模糊化 */
+    .cv-img { width: 100%; height: 100%; display: block; object-fit: contain; image-rendering: pixelated; image-rendering: crisp-edges; }
+    .cv-img-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #c7c7cc; font-size: 13px; }
+    .cv-img-badge { position: absolute; left: 6px; top: 5px; font-size: 11px; padding: 2px 6px; border-radius: 10px; color: #fff; font-weight: 600; background: rgba(0,0,0,0.55); font-family: ui-monospace, monospace; }
+    .cv-img-badge.ok { background: rgba(26,127,55,0.85); }
+    .cv-img-badge.bad { background: rgba(180,35,24,0.85); }
+    .cv-img-badge-r  { left: auto; right: 8px; }
+    .cv-img-badge-rb { left: auto; right: 8px; top: auto; bottom: 6px; }
+    .cv-img-badge-fr { top: 28px; }
+    .cv-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    /* SVG 不写 viewBox，内部坐标 == wrap 像素坐标 (cvDispW × cvDispH)。
+       所有点的 cx/cy 都是模板里手动算的：p.x * cvScaleX + cvOffsetX。
+       cvScale*/cvOffset* 由 cvImgRect computed 出，与 <img object-fit:contain>
+       的几何位置一致 → 标签必贴合五官。
+       cvDotRadius/cvLabelFontSize 等也按 cvScaleX 等比例放大 →
+       图皮多大、标记跟着多大，且 wrap 改尺寸时只改 cvDispW/H 即可。 */
+    .cv-meta {
+      flex: 1;
+      min-width: 0;
+    }
+    .cv-legend { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; font-size: 12px; }
+    .cv-legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,0.15); }
+
+    .servo-manual-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 8px 0 14px; }
+    .servo-manual-num { width: 4.5rem; padding: 6px 8px; border: 1px solid #c7c7cc; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 13px; }
+    .servo-dpad-wrap { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+    .servo-dpad {
+      display: grid;
+      grid-template-columns: 52px 52px 52px;
+      grid-template-rows: 52px 52px 52px;
+      gap: 6px;
+      user-select: none;
+    }
+    .servo-dpad-sp { visibility: hidden; }
+    .servo-dpad-btn {
+      width: 52px; height: 52px; padding: 0;
+      border-radius: 10px; border: 1px solid #c7c7cc; background: #fff;
+      font-size: 20px; line-height: 1; cursor: pointer;
+      color: #1d1d1f;
+    }
+    .servo-dpad-btn:hover:not(:disabled) { background: #e8f0fe; border-color: #0071e3; }
+    .servo-dpad-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .servo-dpad-mid { opacity: 0.25; cursor: default; font-size: 24px; }
+    .servo-abs-wrap { display: flex; flex-direction: column; gap: 6px; }
+    .servo-abs-title { margin: 0; line-height: 1.3; }
+    .servo-abs-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 56px);
+      grid-template-rows: repeat(3, 48px);
+      gap: 6px;
+      user-select: none;
+    }
+    .servo-abs-btn {
+      width: 56px; height: 48px; padding: 2px 4px;
+      border-radius: 10px; border: 1px solid #c7c7cc; background: #fff;
+      font-size: 11px; line-height: 1.2; cursor: pointer;
+      color: #1d1d1f; font-family: ui-monospace, monospace;
+    }
+    .servo-abs-btn:hover:not(:disabled) { background: #e8f4ea; border-color: #1a7f37; }
+    .servo-abs-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .servo-manual-side { flex: 1; min-width: 200px; }
+    .servo-manual-preview { margin: 0 0 8px; line-height: 1.45; word-break: break-all; }
+  </style>
+  <script>
+    const { createApp } = Vue;
+    const FACE_KEYS = ["left_eye", "right_eye", "nose", "mouth_left", "mouth_right"];
+    const FACE_LABELS = {
+      left_eye: "左眼",
+      right_eye: "右眼",
+      nose: "鼻尖",
+      mouth_left: "左嘴角",
+      mouth_right: "右嘴角",
+    };
+    const FACE_COLORS = {
+      left_eye: "#4da3ff",
+      right_eye: "#ff9f0a",
+      nose: "#30d158",
+      mouth_left: "#ff375f",
+      mouth_right: "#bf5af2",
+    };
+
+    // 摄像头实时画面叠加 9 点：眼角(蓝) / 瞳孔(黄) / 鼻尖(绿) / 嘴角(红)
+    const CV_LANDMARK_COLORS = {
+      left_eye_outer:  "#0a84ff",
+      left_eye_inner:  "#0a84ff",
+      left_eye_iris:   "#ffd60a",
+      right_eye_outer: "#0a84ff",
+      right_eye_inner: "#0a84ff",
+      right_eye_iris:  "#ffd60a",
+      nose:            "#30d158",
+      mouth_left:      "#ff453a",
+      mouth_right:     "#ff453a",
+    };
+    /** 自动跟随 / 注视：与 ``/api/device_servo?with_scene=…`` 同批原子下发（见 deskbot-server）。 */
+    const CV_AUTO_SMILE_SCENE_LC = "happy_smile";
+    /** 避免人脸跟踪抖动时反复刷表情（毫秒）。 */
+    const CV_AUTO_SMILE_MIN_MS = 10000;
+    /** 固定镜头：画面中心对应舵机绝对中位（与 pb 协议 / LLM 标定一致）。 */
+    const CV_GAZE_SERVO_CENTER_X = 90;
+    const CV_GAZE_SERVO_CENTER_Y = 90;
+    /**
+     * 画面角 → 绝对舵机：x = center + CV_GAZE_MAP_YAW_SIGN * screenYaw，
+     * y = center + CV_GAZE_MAP_PITCH_SIGN * screenPitch。
+     * 本机实测：左右与默认相反（yaw 取反）；上下与默认相反（pitch 取反，见下）。
+     * 人脸在画面右 → x 减小；在画面下 → y 增大（与手动 ▲▼ 的 y 增减方向一致时请只改其一）。
+     */
+    const CV_GAZE_MAP_YAW_SIGN = -1;
+    const CV_GAZE_MAP_PITCH_SIGN = 1;
+    /** 摄像头斜向上：自动跟随/注视时在绝对 y 上叠加向上偏置（舵机 y 增大）。 */
+    const CV_GAZE_CAMERA_PITCH_UP_OFFSET = 25;
+    /** 与 ``vision/geometry.FRONTAL_THRESHOLD`` / ``camera_frame`` 一致。 */
+    const CV_FRONTAL_THRESHOLD = 0.4;
+
+    function formatNum(x) {
+      if (x == null || Number.isNaN(Number(x))) return "—";
+      const n = Number(x);
+      if (!Number.isFinite(n)) return "—";
+      if (Math.abs(n) >= 1000) return n.toFixed(0) + " ms";
+      if (Math.abs(n) >= 10) return n.toFixed(1) + " ms";
+      return n.toFixed(2) + " ms";
+    }
+
+    function formatAtOrTs(row) {
+      const pad2 = (n) => String(n).padStart(2, "0");
+      const fmtTime = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+      if (row.received_at) {
+        const s = String(row.received_at).replace(/\s+[+-]\d{4}$/, "");
+        const m = s.match(/\d{2}:\d{2}:\d{2}/);
+        if (m) return m[0];
+      }
+      if (row.received_ts) {
+        const d = new Date(Number(row.received_ts) * 1000);
+        if (!Number.isNaN(d.getTime())) return fmtTime(d);
+      }
+      return "—";
+    }
+
+    function buildDpWsUrl(base, device_id) {
+      const url = new URL(base);
+      url.searchParams.set("role", "subscriber");
+      if (device_id) url.searchParams.set("device", device_id);
+      return url.toString();
+    }
+
+    function buildCvWsUrl(base, device_id) {
+      const url = new URL(base);
+      if (device_id) url.searchParams.set("device_id", device_id);
+      else url.searchParams.delete("device_id");
+      return url.toString();
+    }
+
+    /** 固定镜头水平视场（°），用于画面角 → 舵机绝对位。 */
+    const CV_CENTER_HFOV_DEG = 120;
+
+    const TTS_HISTORY_LS_KEY = "debug_devices_tts_history";
+    const TTS_HISTORY_MAX = 100;
+
+    /** 绝对位置 3×3：列 x=45/90/135，行 y=135/90/65；中心 90/90。 */
+    const MANUAL_ABS_SERVO_PRESETS = [
+      { x: 45, y: 135 }, { x: 90, y: 135 }, { x: 135, y: 135 },
+      { x: 45, y: 90 },  { x: 90, y: 90 },  { x: 135, y: 90 },
+      { x: 45, y: 65 },  { x: 90, y: 65 },  { x: 135, y: 65 },
+    ];
+
+    const CV_DISP_W = Math.round(640 * 2 / 3);
+    const CV_DISP_H = Math.round(480 * 2 / 3);
+
+    createApp({
+      data() {
+        return {
+          dpBase: window.__DEVICE_PIPELINE_WS_BASE__ || "ws://127.0.0.1:9000/device_pipeline",
+          cvBase: window.__CAMERA_VIEW_WS_BASE__ || "ws://127.0.0.1:9000/camera_view",
+          httpBase: window.__DESKBOT_HTTP_BASE__ || "http://127.0.0.1:9000",
+
+          selected: "",
+          devices: [],
+          deviceListError: "",
+
+          cvWs: null,
+          cvConnected: false,
+          cvStatus: "未连接",
+          cvError: "",
+          cvImgUrl: "",
+          cvLastDevice: "",
+          cvLastSize: 0,
+          cvLastDetected: null,
+          cvLastRecv: "",
+          cvFrameCount: 0,
+          cvFps: 0,
+          cvLandmarks: [],
+          // 服务端 9 点版 yaw 角度（°）。正对 0°，向自身右负、向自身左正。
+          // null = 暂无（未检测到人脸 / 关键点缺失），UI 显示 "—"。
+          cvYawDeg: null,
+          // 服务端 9 点版 pitch 角度（°）。正对 0°，抬头正、低头负。
+          // null = 暂无；与 yaw 解耦——可能 yaw 有值但 pitch 缺嘴角。
+          cvPitchDeg: null,
+          // 虹膜（瞳孔）水平偏移：0 贴左眼角 / 0.5 居中 / 1 贴右眼角。
+          // 每只眼一份，缺关键点（外眼角/内眼角/iris）任一时为 null。
+          // 仅显示用，不发往机器人。
+          cvIrisLeft: null,
+          cvIrisRight: null,
+          cvFrameW: 320,
+          cvFrameH: 240,
+          // wrap 实际显示像素尺寸——必须与 .cv-img-wrap CSS width/height 同步（原 640×480 的 2/3）。
+          cvDispW: CV_DISP_W,
+          cvDispH: CV_DISP_H,
+          // 镜头水平视场（°），用于由鼻尖像素偏移反算舵机居中角；默认 120，存 localStorage。
+          cvServoStatus: "",
+          cvServoStatusErr: false,
+          cvServoSending: false,
+          cvSceneSending: false,
+          cvSceneActionStatus: "",
+          cvSceneActionStatusErr: false,
+          pbSceneKeys: [],
+          pbScenesError: "",
+          cvVoiceAutoReply: true,
+          cvVoiceAutoReplySaving: false,
+          cvVoiceAutoReplyErr: "",
+          _cvServoStatusTimer: null,
+          _cvFpsTimer: null,
+          _cvLastFpsSample: { ts: 0, count: 0 },
+          _cvPendingMeta: null,
+          _cvManualDisconnect: false,
+          _cvReconnectTimer: null,
+          // 自动：'' | 'follow' | 'gaze'（固定镜头→绝对位 xm=ym=0；gaze 须正脸）
+          cvServoAutoMode: "",
+          _cvFollowTickTimer: null,
+          _cvFollowLastSendMs: 0,
+          _cvFollowLastIx: null,
+          _cvFollowLastIy: null,
+          _cvFollowLastSmileMs: 0,
+
+          manualServoDeg: 5,
+          manualServoXm: 0,
+          manualServoMs: 500,
+          manualServoAction: "opportunistic",
+          manualServoSending: false,
+          manualServoStatus: "",
+          manualServoStatusErr: false,
+          _manualServoStatusTimer: null,
+        manualServoLastDir: "",
+          manualAbsServoPresets: MANUAL_ABS_SERVO_PRESETS,
+
+          ttsInputText: "",
+          ttsHistory: [],
+          ttsSending: false,
+          ttsSendError: "",
+
+          cvFpFrontalScore: null,
+          cvFpIsFrontal: false,
+          cvFpConfidence: null,
+          cvFpPoints: [],
+
+          dpWs: null,
+          dpConnected: false,
+          dpStatus: "未连接",
+          dpError: "",
+          dpEvents: [],
+          dpIndex: Object.create(null),
+          dpMaxEvents: 100,
+          dpLastRecv: "",
+          _dpSeq: 0,
+          _dpManualDisconnect: false,
+          _dpReconnectTimer: null,
+        };
+      },
+      computed: {
+        dpWsUrl() { return buildDpWsUrl(this.dpBase, this.selected); },
+        cvWsUrl() { return buildCvWsUrl(this.cvBase, this.selected); },
+        // 把图像坐标 (0..cvFrameW, 0..cvFrameH) 映射到 wrap 像素 (0..cvDispW, 0..cvDispH)，
+        // 与 <img object-fit:contain> 在 wrap 中实际渲染出的几何位置一致：
+        //   - 图与 wrap 比例相同 → 满铺，offset=0
+        //   - 图比 wrap 宽 → 上下留黑边，offsetY > 0
+        //   - 图比 wrap 高 → 左右留黑边，offsetX > 0
+        // 这样 SVG 直接画在原始像素坐标上，**和图绝对贴合**。
+        cvImgRect() {
+          const fw = Math.max(1, Number(this.cvFrameW) || 1);
+          const fh = Math.max(1, Number(this.cvFrameH) || 1);
+          const dw = Math.max(1, Number(this.cvDispW) || 1);
+          const dh = Math.max(1, Number(this.cvDispH) || 1);
+          const ratio = fw / fh;
+          const wrapRatio = dw / dh;
+          let w, h, ox, oy;
+          if (ratio > wrapRatio) {
+            // 图更扁：按宽度顶满，上下留黑边
+            w = dw; h = w / ratio;
+            ox = 0; oy = (dh - h) / 2;
+          } else {
+            // 图更竖（含相等）：按高度顶满，左右留黑边
+            h = dh; w = h * ratio;
+            ox = (dw - w) / 2; oy = 0;
+          }
+          return { w, h, ox, oy, sx: w / fw, sy: h / fh };
+        },
+        cvScaleX()  { return this.cvImgRect.sx; },
+        cvScaleY()  { return this.cvImgRect.sy; },
+        cvOffsetX() { return this.cvImgRect.ox; },
+        cvOffsetY() { return this.cvImgRect.oy; },
+        // 圆点描边宽度按 scale 等比例放大；保底 0.5 防止极小分辨率下消失。
+        cvStrokeWidth() { return Math.max(0.5, this.cvScaleX * 0.5); },
+        // 显示用文本：null → ""；正值带 "+"；保留 1 位小数；末尾加 "°"。
+        cvYawDegLabel()   { return this._fmtAngleDeg(this.cvYawDeg); },
+        cvPitchDegLabel() { return this._fmtAngleDeg(this.cvPitchDeg); },
+        cvIrisLeftLabel()  { return this._fmtIrisOffset(this.cvIrisLeft); },
+        cvIrisRightLabel() { return this._fmtIrisOffset(this.cvIrisRight); },
+        // 由鼻尖相对画幅中心的像素偏移估算画面角（°）。
+        // rectilinear：水平角 atan(2·dx·tan(hfov/2)/w)，垂直角 atan(2·dy·tan(vfov/2)/h)。
+        // screenYaw/screenPitch：固定镜头下人脸在画面中的方位（右/下为正），用于绝对舵机定位。
+        cvCenterAngles() {
+          if (this.cvLastDetected !== true) {
+            return { screenYaw: null, screenPitch: null };
+          }
+          const nose = (this.cvLandmarks || []).find((p) => p.name === "nose");
+          const w = Number(this.cvFrameW) || 0;
+          const h = Number(this.cvFrameH) || 0;
+          if (!nose || !Number.isFinite(Number(nose.x)) || !Number.isFinite(Number(nose.y)) || w <= 0 || h <= 0) {
+            return { screenYaw: null, screenPitch: null };
+          }
+          const hfovRad = (CV_CENTER_HFOV_DEG * Math.PI) / 180;
+          const vfovRad = 2 * Math.atan(Math.tan(hfovRad / 2) * (h / w));
+          const dx = Number(nose.x) - w / 2;
+          const dy = Number(nose.y) - h / 2;
+          const r2d = 180 / Math.PI;
+          const screenYaw = Math.atan((2 * dx * Math.tan(hfovRad / 2)) / w) * r2d;
+          const screenPitch = Math.atan((2 * dy * Math.tan(vfovRad / 2)) / h) * r2d;
+          return {
+            screenYaw: Math.round(screenYaw * 10) / 10,
+            screenPitch: Math.round(screenPitch * 10) / 10,
+          };
+        },
+        cvCenterYawDeg()   { return this.cvCenterAngles.screenYaw; },
+        cvCenterPitchDeg() { return this.cvCenterAngles.screenPitch; },
+        cvCenterYawLabel()   { return this._fmtAngleDeg(this.cvCenterYawDeg); },
+        cvCenterPitchLabel() { return this._fmtAngleDeg(this.cvCenterPitchDeg); },
+        // 鼻尖在原图坐标系下的像素位置（与 landmarks 一致）
+        cvNosePixelLabel() {
+          if (this.cvLastDetected !== true) return "—";
+          const n = (this.cvLandmarks || []).find((p) => p.name === "nose");
+          if (!n || !Number.isFinite(Number(n.x)) || !Number.isFinite(Number(n.y))) return "—";
+          return `(${Number(n.x).toFixed(1)}, ${Number(n.y).toFixed(1)})`;
+        },
+        // 固定镜头：画面角 1°≈舵机 1 档，绝对定位 xm=ym=0（见 CV_GAZE_MAP_*_SIGN）
+        cvAbsServoXInt() {
+          const p = this.cvCenterAngles;
+          if (p.screenYaw == null || !Number.isFinite(Number(p.screenYaw))) return null;
+          const v = CV_GAZE_SERVO_CENTER_X + CV_GAZE_MAP_YAW_SIGN * Number(p.screenYaw);
+          return Math.max(0, Math.min(180, Math.round(v)));
+        },
+        cvAbsServoYInt() {
+          const p = this.cvCenterAngles;
+          if (p.screenPitch == null || !Number.isFinite(Number(p.screenPitch))) return null;
+          const v = CV_GAZE_SERVO_CENTER_Y + CV_GAZE_MAP_PITCH_SIGN * Number(p.screenPitch);
+          return Math.max(0, Math.min(180, Math.round(v)));
+        },
+        cvAbsServoXLabel() {
+          const v = this.cvAbsServoXInt;
+          return v == null ? "—" : String(v);
+        },
+        cvAbsServoYLabel() {
+          const v = this.cvAbsServoYInt;
+          return v == null ? "—" : String(v);
+        },
+        /** 跟随/注视下发用：画面角 y + 仰装向上补偿 */
+        cvAbsServoYIntAuto() {
+          const base = this.cvAbsServoYInt;
+          if (base == null) return null;
+          return Math.max(
+            0,
+            Math.min(180, Math.round(base + CV_GAZE_CAMERA_PITCH_UP_OFFSET)),
+          );
+        },
+        cvAbsServoYAutoLabel() {
+          const v = this.cvAbsServoYIntAuto;
+          return v == null ? "—" : String(v);
+        },
+        cvServoPreviewLine() {
+          const nose = this.cvNosePixelLabel;
+          const sy = this.cvCenterAngles.screenYaw;
+          const sp = this.cvCenterAngles.screenPitch;
+          const ang = (sy != null && sp != null)
+            ? `画面角 ${this._fmtAngleDeg(sy)}/${this._fmtAngleDeg(sp)}`
+            : "画面角 —";
+          const auto = this.cvServoAutoMode === "follow" || this.cvServoAutoMode === "gaze";
+          const yLbl = auto ? this.cvAbsServoYAutoLabel : this.cvAbsServoYLabel;
+          const off = auto ? ` 仰装+${CV_GAZE_CAMERA_PITCH_UP_OFFSET}` : "";
+          const gazeHold = this.cvServoAutoMode === "gaze" && !this.cvGazeMaySendServo
+            && (this.cvLastDetected !== true || !this.cvFpIsFrontal);
+          const gazeTag = gazeHold ? " · 注视：未满足(需人脸+正脸)" : "";
+          return `鼻尖 ${nose} · ${ang} → 绝对 x=${this.cvAbsServoXLabel} y=${yLbl}${off} (xm=ym=0)${gazeTag}`;
+        },
+        cvStreamStatsLine() {
+          const t = this.cvLastRecv || "—";
+          const fps = this.cvFps ? `${this.cvFps.toFixed(1)} fps` : "—";
+          const sz = this.cvLastSize ? this.formatBytes(this.cvLastSize) : "—";
+          const n = Number.isFinite(Number(this.cvFrameCount)) ? String(this.cvFrameCount) : "—";
+          return `最后帧时间 ${t} · 刷新率 ${fps} · 最后帧大小 ${sz} · 已收帧数 ${n}`;
+        },
+        cvCanSendServo() {
+          if (!this.selected) return false;
+          if (!this.cvConnected) return false;
+          if (this.cvLastDetected !== true) return false;
+          if (this.cvLastDevice && this.cvLastDevice !== this.selected) return false;
+          return this.cvAbsServoXInt != null && this.cvAbsServoYInt != null;
+        },
+        cvCanSendPbScene() {
+          return !!this.selected;
+        },
+        cvSceneActionBusy() {
+          return this.ttsSending || this.cvSceneSending;
+        },
+        /** 注视感知：有人脸且正脸才允许下发；跟随人脸仅需 ``cvCanSendServo``。 */
+        cvGazeMaySendServo() {
+          if (this.cvLastDetected !== true) return false;
+          if (!this._cvIsFrontalFromMeta()) return false;
+          return this.cvCanSendServo;
+        },
+        cvServoAutoDiag() {
+          const mode = this.cvServoAutoMode;
+          if (mode !== "follow" && mode !== "gaze") return "";
+          if (!this.selected) return "需选择具体设备";
+          if (!this.cvConnected) return "camera_view 未连接";
+          if (this.cvLastDevice && this.cvLastDevice !== this.selected) {
+            return `画面设备 ${this.cvLastDevice} ≠ 所选`;
+          }
+          if (this.cvLastDetected !== true) return "未检测到人脸";
+          if (mode === "gaze" && !this.cvGazeMaySendServo) {
+            if (this.cvLastDetected !== true) return "注视：未检测到人脸，不下发";
+            if (!this._cvIsFrontalFromMeta()) {
+              const fs = this.cvFpFrontalScore;
+              if (fs == null) return "注视：非正脸，不下发";
+              return `注视：非正脸，不下发（分数 ${Number(fs).toFixed(2)}）`;
+            }
+            return "注视：无法计算舵机位，不下发";
+          }
+          const ca = this.cvCenterAngles;
+          const sy = ca.screenYaw;
+          const sp = ca.screenPitch;
+          if (sy == null || sp == null) return "无画面角（缺鼻尖）";
+          const ax = this.cvAbsServoXInt;
+          const ay = this.cvAbsServoYIntAuto;
+          if (ax == null || ay == null) return "无法计算绝对舵机位";
+          const dead = mode === "gaze" ? 0.5 : 0.15;
+          if (Math.abs(Number(sy)) <= dead && Math.abs(Number(sp)) <= dead) {
+            return `居中死区 ≤${dead}° 画面=${Number(sy).toFixed(1)}°/${Number(sp).toFixed(1)}° → x=${ax} y=${ay} (+${CV_GAZE_CAMERA_PITCH_UP_OFFSET}仰装)`;
+          }
+          const tag = mode === "gaze" ? "正脸+注视" : "跟随";
+          return `将绝对定位 [${tag}] x=${ax} y=${ay}（+${CV_GAZE_CAMERA_PITCH_UP_OFFSET}°仰装，画面 ${Number(sy).toFixed(1)}°/${Number(sp).toFixed(1)}°）`;
+        },
+        cvFpPointsFull() {
+          const byName = {};
+          for (const p of (this.cvFpPoints || [])) byName[p.name] = p;
+          return FACE_KEYS.map((name) => ({
+            name,
+            x: byName[name] ? byName[name].x : null,
+            y: byName[name] ? byName[name].y : null,
+            color: FACE_COLORS[name],
+          }));
+        },
+        selectedDeviceDetail() {
+          if (!this.selected) return null;
+          return this.devices.find((d) => d.device_id === this.selected) || null;
+        },
+        manualCanSendServo() {
+          return !!this.selected;
+        },
+        ttsCanSend() {
+          return !!this.selected && !!(this.ttsInputText || "").trim() && !this.ttsSending;
+        },
+        manualServoXmLabel() {
+          return Number(this.manualServoXm) === 0 ? "绝对" : "相对";
+        },
+        manualServoPreview() {
+          const deg = this.manualClampDegValue();
+          const xm = Number(this.manualServoXm) === 0 ? 0 : 1;
+          const ms = this.manualClampMsValue();
+          const act = this.manualServoAction || "opportunistic";
+          const dir = this.manualServoLastDir;
+          const absM = dir && /^abs\((\d+),(\d+)\)$/.exec(dir);
+          if (absM) {
+            return `绝对 x=${absM[1]} y=${absM[2]} xm=0 ym=0 ms=${ms} action=${act}`;
+          }
+          let x = 0;
+          let y = 0;
+          if (dir === "left") x = -deg;
+          else if (dir === "right") x = deg;
+          else if (dir === "up") y = deg;
+          else if (dir === "down") y = -deg;
+          if (!dir) return `pb_single x=${x} y=${y} xm=${xm} ms=${ms}`;
+          return `${dir} → x=${x} y=${y} (${this.manualServoXmLabel})`;
+        },
+      },
+      methods: {
+        faceLabel(name) { return FACE_LABELS[name] || name; },
+        /** @returns {string} 与 ``pbSceneKeys`` 中条目完全一致的 key，找不到则 ``""`` */
+        _cvResolvePbSceneKey(lc) {
+          const w = String(lc || "").trim().toLowerCase();
+          if (!w) return "";
+          for (const k of this.pbSceneKeys || []) {
+            if (String(k).trim().toLowerCase() === w) return String(k).trim();
+          }
+          return "";
+        },
+        formatChannels(ch) {
+          if (!ch || typeof ch !== "object") return "";
+          const parts = Object.entries(ch)
+            .filter(([, v]) => Number(v) > 0)
+            .map(([k, v]) => `${k}×${v}`);
+          return parts.join(" / ");
+        },
+
+        ttsLoadHistory() {
+          try {
+            const raw = localStorage.getItem(TTS_HISTORY_LS_KEY);
+            if (!raw) return;
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) return;
+            this.ttsHistory = arr
+              .filter((r) => r && typeof r.text === "string")
+              .slice(0, TTS_HISTORY_MAX)
+              .map((r) => ({
+                id: String(r.id || (Date.now() + Math.random())),
+                text: r.text,
+                sentAt: r.sentAt || "—",
+                status: r.status === "ok" || r.status === "error" ? r.status : "ok",
+                error: r.error || "",
+              }));
+          } catch (e) { /* ignore */ }
+        },
+        ttsPersistHistory() {
+          try {
+            localStorage.setItem(
+              TTS_HISTORY_LS_KEY,
+              JSON.stringify(this.ttsHistory.slice(0, TTS_HISTORY_MAX)),
+            );
+          } catch (e) { /* ignore */ }
+        },
+        ttsPushHistoryEntry(text) {
+          const entry = {
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            text,
+            sentAt: new Date().toLocaleString(),
+            status: "sending",
+            error: "",
+          };
+          this.ttsHistory.unshift(entry);
+          if (this.ttsHistory.length > TTS_HISTORY_MAX) {
+            this.ttsHistory.length = TTS_HISTORY_MAX;
+          }
+          this.ttsPersistHistory();
+          return entry;
+        },
+        _cvSetSceneActionStatus(msg, isErr = false) {
+          this.cvSceneActionStatus = msg || "";
+          this.cvSceneActionStatusErr = !!isErr;
+        },
+        async ttsSendText(text, opts = {}) {
+          const clearInput = !!(opts && opts.clearInput);
+          const existingEntry = opts && opts.existingEntry;
+          const scene = opts && opts.scene ? String(opts.scene).trim() : "";
+          const t = String(text || "").trim();
+          if (!t || !this.selected || this.ttsSending) return false;
+          this.ttsSending = true;
+          this.ttsSendError = "";
+          const entry = existingEntry || this.ttsPushHistoryEntry(t);
+          if (existingEntry) {
+            entry.status = "sending";
+            entry.error = "";
+            this.ttsPersistHistory();
+          }
+          if (scene) {
+            this._cvSetSceneActionStatus(`TTS+场景「${scene}」下发中…`, false);
+          }
+          try {
+            const url = new URL(this.httpBase + "/api/device_tts");
+            url.searchParams.set("device_id", this.selected);
+            url.searchParams.set("text", t);
+            if (scene) url.searchParams.set("scene", scene);
+            const res = await fetch(url.toString(), { cache: "no-store" });
+            let body = {};
+            try { body = await res.json(); } catch (e) {}
+            if (!res.ok) {
+              throw new Error(body.error || ("HTTP " + res.status));
+            }
+            if (!body.ok) {
+              throw new Error(body.error || body.hint || "下发失败");
+            }
+            entry.status = "ok";
+            entry.error = "";
+            entry.req = body.req || "";
+            entry.sentAt = new Date().toLocaleString();
+            if (clearInput) this.ttsInputText = "";
+            this.ttsPersistHistory();
+            if (scene) {
+              this._cvSetSceneActionStatus(
+                `已提交 TTS+场景「${scene}」req=${body.req || "?"}`,
+                false,
+              );
+            }
+            return true;
+          } catch (e) {
+            const msg = e && e.message ? e.message : String(e);
+            entry.status = "error";
+            entry.error = msg;
+            entry.sentAt = new Date().toLocaleString();
+            this.ttsSendError = "TTS 下发失败：" + msg;
+            this.ttsPersistHistory();
+            if (scene) {
+              this._cvSetSceneActionStatus("TTS+场景下发失败：" + msg, true);
+            }
+            return false;
+          } finally {
+            this.ttsSending = false;
+          }
+        },
+        ttsSendNew() {
+          void this.ttsSendText(this.ttsInputText, { clearInput: true });
+        },
+        cvSceneSendTextOnly() {
+          void this.ttsSendText(this.ttsInputText, { clearInput: false });
+        },
+        async cvSendSceneAction(scene) {
+          const sc = this._cvResolvePbSceneKey(scene) || String(scene || "").trim();
+          if (!sc || !this.cvCanSendPbScene || this.cvSceneActionBusy) return false;
+          const text = (this.ttsInputText || "").trim();
+          if (text) {
+            return this.ttsSendText(text, { scene: sc, clearInput: false });
+          }
+          return this.cvSendPbScene(sc, { useSceneStatus: true });
+        },
+        ttsResend(row) {
+          if (!row || this.ttsSending) return;
+          void this.ttsSendText(row.text, { clearInput: false, existingEntry: row });
+        },
+
+        _cvCoerceAutoReplyEnabled(v) {
+          if (v === true || v === 1 || v === "1") return true;
+          if (v === false || v === 0 || v === "0") return false;
+          return null;
+        },
+        async cvFetchVoiceAutoReply() {
+          this.cvVoiceAutoReplyErr = "";
+          try {
+            const res = await fetch(this.httpBase + "/api/asr_auto_reply", { cache: "no-store" });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const d = await res.json();
+            const en = d && d.ok ? this._cvCoerceAutoReplyEnabled(d.enabled) : null;
+            if (en !== null) this.cvVoiceAutoReply = en;
+          } catch (e) {
+            this.cvVoiceAutoReplyErr = "读取自动应答开关失败：" + (e && e.message ? e.message : e);
+          }
+        },
+        async cvOnVoiceAutoReplyChange(ev) {
+          const el = ev && ev.target;
+          const want = !!(el && el.checked);
+          const prev = this.cvVoiceAutoReply;
+          this.cvVoiceAutoReply = want;
+          this.cvVoiceAutoReplySaving = true;
+          this.cvVoiceAutoReplyErr = "";
+          try {
+            const q = want ? "1" : "0";
+            const res = await fetch(this.httpBase + "/api/asr_auto_reply?enabled=" + q, { cache: "no-store" });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const d = await res.json();
+            if (!d || !d.ok) throw new Error((d && d.error) || "bad response");
+            const en = this._cvCoerceAutoReplyEnabled(d.enabled);
+            if (en !== null) {
+              this.cvVoiceAutoReply = en;
+              if (el) el.checked = en;
+            }
+          } catch (e) {
+            this.cvVoiceAutoReply = prev;
+            if (el) el.checked = prev;
+            this.cvVoiceAutoReplyErr = "保存自动应答开关失败：" + (e && e.message ? e.message : e);
+          } finally {
+            this.cvVoiceAutoReplySaving = false;
+          }
+        },
+
+        async refreshDevices() {
+          try {
+            const res = await fetch(this.httpBase + "/api/devices", { cache: "no-store" });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const d = await res.json();
+            this.devices = Array.isArray(d.devices) ? d.devices : [];
+            this.deviceListError = "";
+          } catch (e) {
+            this.deviceListError = "获取设备列表失败：" + (e && e.message ? e.message : e);
+          }
+          await this.refreshPbScenes();
+        },
+        async refreshPbScenes() {
+          this.pbScenesError = "";
+          try {
+            const res = await fetch(this.httpBase + "/api/device_pb_scenes", { cache: "no-store" });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const d = await res.json();
+            this.pbSceneKeys = Array.isArray(d.scenes) ? d.scenes.slice() : [];
+            if (!this.pbSceneKeys.length && d.ok) {
+              this.pbScenesError = "";
+            }
+          } catch (e) {
+            this.pbSceneKeys = [];
+            this.pbScenesError = "场景列表获取失败：" + (e && e.message ? e.message : e);
+          }
+        },
+
+        dpMs(v) { return formatNum(v); },
+        dpFormatTime(r) { return formatAtOrTs(r); },
+        dpStatusLabel(r) {
+          if (!r) return "—";
+          if (r.status === "error") return r.error_stage ? `失败（${r.error_stage}）` : "失败";
+          if (r.status === "ok") return "成功";
+          if (r.stage) {
+            switch (r.stage) {
+              case "asr_start": return "ASR 中…";
+              case "asr_text": return "ASR 完成";
+              case "llm_text": return "LLM 完成";
+              case "playback_done": return "成功";
+              default: return r.stage;
+            }
+          }
+          return "—";
+        },
+        dpStatusClass(r) {
+          if (!r) return "";
+          if (r.status === "error") return "bad";
+          if (r.status === "ok") return "ok";
+          return "running";
+        },
+        dpClear() { this.dpEvents = []; this.dpIndex = Object.create(null); this.dpLastRecv = ""; },
+        dpEnsureRow(evt) {
+          const rid = evt && evt.request_id;
+          if (rid && this.dpIndex[rid] != null) {
+            return this.dpEvents[this.dpIndex[rid]];
+          }
+          const row = {
+            _seq: ++this._dpSeq,
+            request_id: rid || null,
+            device_id: evt && evt.device_id || "",
+            stage: evt && evt.stage || null,
+            received_ts: evt && (evt.ts || evt.received_ts) || (Date.now() / 1000),
+            received_at: evt && (evt.received_at || null),
+            status: "running",
+            asr_text: null, asr_ms: null, source: evt && evt.source || null,
+            llm_text: null, llm_ms: null,
+            tts_text: null, tts_ms: null,
+            e2e_ms: null,
+            error: null,
+            error_stage: null,
+          };
+          this.dpEvents.unshift(row);
+          if (rid) this.dpIndex[rid] = 0;
+          // 更新所有 request_id 对应索引（因为 unshift 造成下标变化）
+          if (rid) {
+            for (let i = 0; i < this.dpEvents.length; i++) {
+              const r = this.dpEvents[i];
+              if (r.request_id) this.dpIndex[r.request_id] = i;
+            }
+          }
+          if (this.dpEvents.length > this.dpMaxEvents) {
+            const removed = this.dpEvents.splice(this.dpMaxEvents);
+            for (const r of removed) { if (r.request_id) delete this.dpIndex[r.request_id]; }
+          }
+          return row;
+        },
+        dpApplyStage(evt) {
+          if (!evt) return;
+          if (evt.stage === "pb_ack") return;
+          const row = this.dpEnsureRow(evt);
+          row.device_id = row.device_id || evt.device_id || "";
+          row.stage = evt.stage || row.stage;
+          if (evt.received_at) row.received_at = row.received_at || evt.received_at;
+          switch (evt.stage) {
+            case "asr_start":
+              row.status = "running";
+              row.source = evt.source || row.source;
+              break;
+            case "asr_text":
+              row.asr_text = evt.text || row.asr_text;
+              row.source = evt.source || row.source;
+              if (evt.asr_ms != null) row.asr_ms = evt.asr_ms;
+              break;
+            case "llm_text":
+              row.llm_text = evt.text || row.llm_text;
+              if (evt.llm_ms != null) row.llm_ms = evt.llm_ms;
+              break;
+            case "playback_done":
+              if (evt.tts_ms != null) row.tts_ms = evt.tts_ms;
+              if (evt.e2e_ms != null) row.e2e_ms = evt.e2e_ms;
+              row.status = "ok";
+              break;
+            case "tts_error":
+              row.status = "error";
+              row.error = evt.error || evt.message || row.error;
+              row.error_stage = "tts";
+              break;
+            case "asr_empty":
+              row.status = "error";
+              row.error = row.error || "empty";
+              row.error_stage = "asr";
+              if (evt.asr_ms != null) row.asr_ms = evt.asr_ms;
+              break;
+            case "asr_rejected":
+              row.status = "error";
+              row.error = row.error || "rejected";
+              row.error_stage = "asr";
+              row.asr_text = evt.text || row.asr_text;
+              if (evt.asr_ms != null) row.asr_ms = evt.asr_ms;
+              break;
+            case "error":
+              row.status = "error";
+              row.error = evt.error || evt.message || row.error;
+              row.error_stage = row.error_stage || "llm";
+              break;
+          }
+          this.dpLastRecv = new Date().toLocaleString();
+        },
+        dpApplyEvent(evt) {
+          if (!evt) return;
+          const row = this.dpEnsureRow(evt);
+          row.device_id = evt.device_id || row.device_id;
+          if (evt.received_at) row.received_at = evt.received_at;
+          if (evt.received_ts != null) row.received_ts = evt.received_ts;
+          if (evt.asr_text != null) row.asr_text = evt.asr_text;
+          if (evt.llm_text != null) row.llm_text = evt.llm_text;
+          if (evt.tts_text != null) row.tts_text = evt.tts_text;
+          if (evt.asr_ms != null) row.asr_ms = evt.asr_ms;
+          if (evt.llm_ms != null) row.llm_ms = evt.llm_ms;
+          if (evt.tts_ms != null) row.tts_ms = evt.tts_ms;
+          if (evt.e2e_ms != null) row.e2e_ms = evt.e2e_ms;
+          if (evt.status) row.status = evt.status;
+          if (evt.error) row.error = evt.error;
+          if (evt.source) row.source = evt.source;
+          this.dpLastRecv = new Date().toLocaleString();
+        },
+        dpReplaceSnapshot(items) {
+          const arr = Array.isArray(items) ? items.slice(0, this.dpMaxEvents) : [];
+          this.dpEvents = [];
+          this.dpIndex = Object.create(null);
+          // 反向插入使最新在前
+          for (let i = arr.length - 1; i >= 0; i--) this.dpApplyEvent(arr[i]);
+          if (arr.length) this.dpLastRecv = new Date().toLocaleString();
+        },
+        dpOnMsg(ev) {
+          if (typeof ev.data !== "string") return;
+          let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+          if (!d || typeof d !== "object") return;
+          if (d.type === "ready") {
+            this.dpStatus = "已连接";
+            if (d.max_events) this.dpMaxEvents = d.max_events;
+            return;
+          }
+          if (d.type === "pipeline_snapshot") {
+            if (d.max_events) this.dpMaxEvents = d.max_events;
+            this.dpReplaceSnapshot(d.items);
+            return;
+          }
+          if (d.type === "pipeline_event") { this.dpApplyEvent(d.event); return; }
+          if (d.type === "pipeline_stage") {
+            if (d.event && d.event.stage === "pb_ack") return;
+            this.dpApplyStage(d.event);
+            return;
+          }
+        },
+        dpConnect() {
+          this.dpError = ""; this.dpStatus = "连接中…";
+          try {
+            const ws = new WebSocket(this.dpWsUrl); this.dpWs = ws;
+            ws.onopen = () => { this.dpConnected = true; this.dpStatus = "已连接"; };
+            ws.onclose = () => {
+              this.dpConnected = false; this.dpStatus = "已断开";
+              if (!this._dpManualDisconnect) {
+                clearTimeout(this._dpReconnectTimer);
+                this._dpReconnectTimer = setTimeout(() => this.dpConnect(), 2000);
+              }
+              this._dpManualDisconnect = false;
+            };
+            ws.onerror = () => { this.dpStatus = "连接错误"; this.dpError = "device_pipeline 连接失败"; };
+            ws.onmessage = (ev) => this.dpOnMsg(ev);
+          } catch (e) { this.dpStatus = "连接失败"; this.dpError = String(e?.message || e); }
+        },
+        dpDisconnect() {
+          this._dpManualDisconnect = true;
+          if (this._dpReconnectTimer) { clearTimeout(this._dpReconnectTimer); this._dpReconnectTimer = null; }
+          if (this.dpWs) { try { this.dpWs.close(); } catch (e) {} } this.dpWs = null;
+          this.dpConnected = false;
+        },
+
+        formatBytes(n) {
+          if (!n && n !== 0) return "—";
+          if (n < 1024) return n + " B";
+          if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+          return (n / 1024 / 1024).toFixed(2) + " MB";
+        },
+        cvDotColor(name) { return CV_LANDMARK_COLORS[name] || "#ffffff"; },
+        // 角度统一显示格式：null/NaN → ""；正值带 "+"；1 位小数；末尾 "°"。
+        _fmtAngleDeg(v) {
+          if (v == null || Number.isNaN(Number(v))) return "";
+          const n = Number(v);
+          const sign = n > 0 ? "+" : "";  // 负号自动带；0 不加号
+          return `${sign}${n.toFixed(1)}°`;
+        },
+        // 虹膜偏移：保留 2 位小数；同时在括号里给出语义提示，方便一眼看趋势。
+        // < 0.45 → "偏左"；> 0.55 → "偏右"；中间 ±0.05 视为"居中"。
+        _fmtIrisOffset(v) {
+          if (v == null || Number.isNaN(Number(v))) return "";
+          const n = Number(v);
+          const tag = n < 0.45 ? "偏左" : (n > 0.55 ? "偏右" : "居中");
+          return `${n.toFixed(2)} (${tag})`;
+        },
+        _cvSetServoStatus(msg, isErr = false) {
+          this.cvServoStatus = msg || "";
+          this.cvServoStatusErr = !!isErr;
+          if (this._cvServoStatusTimer) clearTimeout(this._cvServoStatusTimer);
+          if (msg) {
+            this._cvServoStatusTimer = setTimeout(() => {
+              this.cvServoStatus = "";
+              this.cvServoStatusErr = false;
+            }, 4000);
+          }
+        },
+        cvToggleAutoMode(mode) {
+          if (this.cvServoAutoMode === mode) this.cvServoAutoMode = "";
+          else this.cvServoAutoMode = mode;
+        },
+        manualClampDegValue() {
+          let n = Number(this.manualServoDeg);
+          if (!Number.isFinite(n)) n = 5;
+          return Math.max(1, Math.min(90, Math.round(n)));
+        },
+        manualClampMsValue() {
+          let n = Number(this.manualServoMs);
+          if (!Number.isFinite(n)) n = 400;
+          return Math.max(50, Math.min(10000, Math.round(n)));
+        },
+        manualClampDeg() {
+          const n = this.manualClampDegValue();
+          if (this.manualServoDeg !== n) this.manualServoDeg = n;
+        },
+        manualClampMs() {
+          const n = this.manualClampMsValue();
+          if (this.manualServoMs !== n) this.manualServoMs = n;
+        },
+        _manualSetServoStatus(msg, isErr = false) {
+          this.manualServoStatus = msg || "";
+          this.manualServoStatusErr = !!isErr;
+          if (this._manualServoStatusTimer) clearTimeout(this._manualServoStatusTimer);
+          if (msg) {
+            this._manualServoStatusTimer = setTimeout(() => {
+              this.manualServoStatus = "";
+              this.manualServoStatusErr = false;
+            }, 5000);
+          }
+        },
+        /**
+         * @param {{ silent?: boolean, withScene?: string|null, xm?: number, ym?: number, ms?: number, action?: string, onStatus?: (msg:string, err:boolean)=>void }} [opts]
+         * @returns {Promise<boolean>}
+         */
+        async sendDeviceServo(ix, iy, opts = {}) {
+          const dev = this.selected;
+          if (!dev || ix == null || iy == null) return false;
+          const silent = !!(opts && opts.silent);
+          const withScene = opts && opts.withScene;
+          const xm = opts && opts.xm != null ? Number(opts.xm) : 0;
+          const ym = opts && opts.ym != null ? Number(opts.ym) : xm;
+          const ms = opts && opts.ms != null ? Number(opts.ms) : 500;
+          const act = (opts && opts.action) || "opportunistic";
+          const onStatus = opts && opts.onStatus;
+          const url = new URL(this.httpBase + "/api/device_servo");
+          url.searchParams.set("device_id", dev);
+          url.searchParams.set("dyaw", String(ix));
+          url.searchParams.set("dpitch", String(iy));
+          url.searchParams.set("xm", String(xm));
+          url.searchParams.set("ym", String(ym));
+          url.searchParams.set("ms", String(ms));
+          url.searchParams.set("action", act);
+          const ws = withScene && String(withScene).trim();
+          if (ws) url.searchParams.set("with_scene", String(withScene).trim());
+          try {
+            const res = await fetch(url.toString(), { cache: "no-store" });
+            let body = {};
+            try { body = await res.json(); } catch (e) {}
+            if (!res.ok) {
+              throw new Error(body.error || ("HTTP " + res.status));
+            }
+            const s = body.servo || {};
+            const sf = body.scene_frames != null ? body.scene_frames : 0;
+            const mode =
+              s.xm === 0 || s.ym === 0 ? "绝对" : "相对";
+            const extra = ws && sf > 0 ? `；同批 with_scene 已带 ${sf} 片 pb` : "";
+            const msg =
+              `已下发 pb_single（${mode}）：x=${s.x != null ? s.x : "?"} y=${s.y != null ? s.y : "?"} xm=${s.xm} ym=${s.ym} ms=${s.ms != null ? s.ms : "?"} req=${body.req || "?"} delivered=${body.delivered != null ? body.delivered : "?"}${extra}`;
+            if (onStatus) onStatus(msg, false);
+            else if (!silent) this._cvSetServoStatus(msg, false);
+            return true;
+          } catch (e) {
+            const errMsg = "下发失败：" + (e && e.message ? e.message : e);
+            if (onStatus) onStatus(errMsg, true);
+            else if (!silent) this._cvSetServoStatus(errMsg, true);
+            return false;
+          }
+        },
+        /**
+         * @param {{ silent?: boolean, withScene?: string|null }} [opts]
+         * @returns {Promise<boolean>}
+         */
+        async _cvSendServoByInts(ix, iy, opts = {}) {
+          const silent = !!(opts && opts.silent);
+          const withScene = opts && opts.withScene;
+          const xm = opts && opts.xm != null ? Number(opts.xm) : 0;
+          const ym = opts && opts.ym != null ? Number(opts.ym) : 0;
+          const ms = opts && opts.ms != null ? Number(opts.ms) : 500;
+          const action = (opts && opts.action) || "opportunistic";
+          if (this.cvServoSending) return false;
+          this.cvServoSending = true;
+          try {
+            return await this.sendDeviceServo(ix, iy, {
+              silent,
+              withScene,
+              xm,
+              ym,
+              ms,
+              action,
+            });
+          } finally {
+            this.cvServoSending = false;
+          }
+        },
+        async manualSendServoDir(dir) {
+          if (!this.manualCanSendServo || this.manualServoSending) return;
+          const deg = this.manualClampDegValue();
+          const xm = Number(this.manualServoXm) === 0 ? 0 : 1;
+          const ms = this.manualClampMsValue();
+          let ix = 0;
+          let iy = 0;
+          if (xm === 0) {
+            if (dir === "left") ix = CV_GAZE_SERVO_CENTER_X - deg;
+            else if (dir === "right") ix = CV_GAZE_SERVO_CENTER_X + deg;
+            else if (dir === "up") iy = CV_GAZE_SERVO_CENTER_Y + deg;
+            else if (dir === "down") iy = CV_GAZE_SERVO_CENTER_Y - deg;
+            else return;
+            ix = Math.max(0, Math.min(180, ix));
+            iy = Math.max(0, Math.min(180, iy));
+          } else if (dir === "left") ix = -deg;
+          else if (dir === "right") ix = deg;
+          else if (dir === "up") iy = deg;
+          else if (dir === "down") iy = -deg;
+          else return;
+          this.manualServoLastDir = dir;
+          this.manualServoSending = true;
+          try {
+            await this.sendDeviceServo(ix, iy, {
+              xm,
+              ym: xm,
+              ms,
+              action: this.manualServoAction,
+              onStatus: (msg, err) => this._manualSetServoStatus(msg, err),
+            });
+          } finally {
+            this.manualServoSending = false;
+          }
+        },
+        async manualSendServoAbs(x, y) {
+          if (!this.manualCanSendServo || this.manualServoSending) return;
+          const ix = Math.max(0, Math.min(180, Math.round(Number(x))));
+          const iy = Math.max(0, Math.min(180, Math.round(Number(y))));
+          const ms = this.manualClampMsValue();
+          this.manualServoLastDir = `abs(${ix},${iy})`;
+          this.manualServoSending = true;
+          try {
+            await this.sendDeviceServo(ix, iy, {
+              xm: 0,
+              ym: 0,
+              ms,
+              action: this.manualServoAction,
+              onStatus: (msg, err) => this._manualSetServoStatus(msg, err),
+            });
+          } finally {
+            this.manualServoSending = false;
+          }
+        },
+        /** 与 ``camera_frame`` 一致：优先 ``is_frontal``，否则用 ``frontal_score``。 */
+        _cvIsFrontalFromMeta() {
+          if (this.cvFpIsFrontal === true) return true;
+          const fs = this.cvFpFrontalScore;
+          return fs != null && Number(fs) >= CV_FRONTAL_THRESHOLD;
+        },
+        _cvGazeClearFollowDebounce() {
+          this._cvFollowLastIx = null;
+          this._cvFollowLastIy = null;
+        },
+        _cvTickFollowServo() {
+          const mode = this.cvServoAutoMode;
+          if (mode !== "follow" && mode !== "gaze") return;
+          if (this.cvServoSending) return;
+          if (mode === "gaze") {
+            if (!this.cvGazeMaySendServo) return;
+          } else if (!this.cvCanSendServo) {
+            return;
+          }
+          const ca = this.cvCenterAngles;
+          const sy = ca.screenYaw;
+          const sp = ca.screenPitch;
+          if (sy == null || sp == null) return;
+          const ix = this.cvAbsServoXInt;
+          const iy = this.cvAbsServoYIntAuto;
+          if (ix == null || iy == null) return;
+          const dead = mode === "gaze" ? 0.5 : 0.15;
+          if (Math.abs(Number(sy)) <= dead && Math.abs(Number(sp)) <= dead) return;
+          const smileKey = this._cvResolvePbSceneKey(CV_AUTO_SMILE_SCENE_LC);
+          const now = Date.now();
+          const minGap = mode === "gaze" ? 350 : 400;
+          if (now - this._cvFollowLastSendMs < minGap) return;
+          if (
+            this._cvFollowLastIx === ix
+            && this._cvFollowLastIy === iy
+            && (now - this._cvFollowLastSendMs) < 1600
+          ) {
+            return;
+          }
+          const canBundleSmile = !!(
+            mode === "gaze"
+            && smileKey
+            && (now - this._cvFollowLastSmileMs >= CV_AUTO_SMILE_MIN_MS)
+          );
+          this._cvSendServoByInts(ix, iy, {
+            silent: true,
+            withScene: canBundleSmile ? smileKey : null,
+            xm: 0,
+            ym: 0,
+            ms: 500,
+          }).then((ok) => {
+            if (ok) {
+              this._cvFollowLastSendMs = Date.now();
+              this._cvFollowLastIx = ix;
+              this._cvFollowLastIy = iy;
+              if (canBundleSmile) this._cvFollowLastSmileMs = Date.now();
+            }
+          });
+        },
+        /** @param {string} scene @param {{ silent?: boolean, useSceneStatus?: boolean }} [opts] @returns {Promise<boolean>} */
+        async cvSendPbScene(scene, opts = {}) {
+          const silent = !!(opts && opts.silent);
+          const useSceneStatus = !!(opts && opts.useSceneStatus);
+          const dev = this.selected;
+          if (!dev || this.cvSceneSending) return false;
+          this.cvSceneSending = true;
+          const url = new URL(this.httpBase + "/api/device_pb_scene");
+          url.searchParams.set("device_id", dev);
+          url.searchParams.set("scene", scene);
+          try {
+            const res = await fetch(url.toString(), { cache: "no-store" });
+            let body = {};
+            try {
+              body = await res.json();
+            } catch (e) {}
+            if (!res.ok) {
+              let err = body.error || ("HTTP " + res.status);
+              if (Array.isArray(body.valid_scenes) && body.valid_scenes.length) {
+                err += " 可用：" + body.valid_scenes.join(", ");
+              }
+              throw new Error(err);
+            }
+            const rq = body.req || "?";
+            const frames = body.frames != null ? body.frames : "?";
+            const n = body.delivered != null ? body.delivered : "?";
+            const isErr = body.delivered === 0;
+            let msg = `场景「${scene}」：req=${rq}，${frames} 片，WebSocket 已发送次数=${n}。`;
+            if (body.hint) msg += body.hint;
+            if (useSceneStatus) {
+              this._cvSetSceneActionStatus(msg, isErr);
+            } else if (!silent) {
+              this._cvSetServoStatus(msg, isErr);
+            } else if (isErr) {
+              this._cvSetServoStatus(msg, true);
+            }
+            return !isErr;
+          } catch (e) {
+            const errMsg = "场景下发失败：" + (e && e.message ? e.message : e);
+            if (useSceneStatus) {
+              this._cvSetSceneActionStatus(errMsg, true);
+            } else {
+              this._cvSetServoStatus(errMsg, true);
+            }
+            return false;
+          } finally {
+            this.cvSceneSending = false;
+          }
+        },
+        // 圆半径按 scale 等比例放大；图越大点越大。
+        // 基准（cvScaleX = 2，即 320×240→640×480）：iris ≈ 3.5px / 其他 ≈ 4.5px。
+        cvDotRadius(name) {
+          const base = /iris$/.test(name) ? 1.75 : 2.25;
+          return Math.max(1, base * this.cvScaleX);
+        },
+        cvResetView() {
+          if (this.cvImgUrl) {
+            try { URL.revokeObjectURL(this.cvImgUrl); } catch (e) {}
+          }
+          this.cvImgUrl = "";
+          this.cvLastDevice = "";
+          this.cvLastSize = 0;
+          this.cvLastDetected = null;
+          this.cvLastRecv = "";
+          this.cvFrameCount = 0;
+          this.cvLandmarks = [];
+          this.cvYawDeg = null;
+          this.cvPitchDeg = null;
+          this.cvIrisLeft = null;
+          this.cvIrisRight = null;
+          this.cvFpFrontalScore = null;
+          this.cvFpIsFrontal = false;
+          this.cvFpConfidence = null;
+          this.cvFpPoints = [];
+          this.cvFrameW = 320;
+          this.cvFrameH = 240;
+          this._cvPendingMeta = null;
+          this._cvLastFpsSample = { ts: Date.now(), count: 0 };
+          this.cvFps = 0;
+          this.cvServoStatus = "";
+          this.cvServoStatusErr = false;
+          this.cvServoSending = false;
+          if (this._cvServoStatusTimer) clearTimeout(this._cvServoStatusTimer);
+          this._cvServoStatusTimer = null;
+        },
+        cvOnMsg(ev) {
+          if (typeof ev.data === "string") {
+            // JSON meta（紧跟下一条 binary）
+            let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+            if (!d || typeof d !== "object") return;
+            if (d.type === "ready") { this.cvStatus = "已连接"; return; }
+            if (d.type === "pong") return;
+            if (d.type === "camera_frame") {
+              this._cvPendingMeta = d;
+              return;
+            }
+            return;
+          }
+          // 二进制 JPEG 帧
+          const blob = ev.data instanceof Blob
+            ? ev.data
+            : new Blob([ev.data], { type: "image/jpeg" });
+          const newUrl = URL.createObjectURL(blob);
+          const oldUrl = this.cvImgUrl;
+          this.cvImgUrl = newUrl;
+          if (oldUrl) {
+            // 在下一帧渲染后再释放，避免 <img> 闪烁
+            setTimeout(() => { try { URL.revokeObjectURL(oldUrl); } catch (e) {} }, 0);
+          }
+          const meta = this._cvPendingMeta;
+          this._cvPendingMeta = null;
+          if (meta) {
+            this.cvLastDevice = meta.device_id || this.cvLastDevice;
+            this.cvLastSize = Number(meta.size) || blob.size || 0;
+            this.cvLastDetected = (typeof meta.detected === "boolean") ? meta.detected : null;
+            if (Number(meta.frame_w) > 0) this.cvFrameW = Number(meta.frame_w);
+            if (Number(meta.frame_h) > 0) this.cvFrameH = Number(meta.frame_h);
+            this.cvLandmarks = Array.isArray(meta.landmarks) ? meta.landmarks : [];
+            // yaw_deg / pitch_deg 仅在 detected=true 且对应关键点齐全时存在；
+            // 其它情况清掉，避免显示陈旧数值。两者解耦：缺嘴角时只 pitch 为 null。
+            this.cvYawDeg = (meta.detected && typeof meta.yaw_deg === "number")
+              ? meta.yaw_deg : null;
+            this.cvPitchDeg = (meta.detected && typeof meta.pitch_deg === "number")
+              ? meta.pitch_deg : null;
+            // iris_offsets：{ left_eye?: number, right_eye?: number }，
+            // 服务端只灌有效值，缺哪只眼那只就是 undefined → 这里归为 null。
+            const iris = (meta.detected && meta.iris_offsets && typeof meta.iris_offsets === "object")
+              ? meta.iris_offsets : null;
+            this.cvIrisLeft  = (iris && typeof iris.left_eye  === "number") ? iris.left_eye  : null;
+            this.cvIrisRight = (iris && typeof iris.right_eye === "number") ? iris.right_eye : null;
+            if (meta.detected === true) {
+              const fs = meta.frontal_score;
+              const fsN = fs != null ? Number(fs) : NaN;
+              this.cvFpFrontalScore = Number.isFinite(fsN) ? fsN : null;
+              const frontalBool = typeof meta.is_frontal === "boolean"
+                ? meta.is_frontal
+                : (Number.isFinite(fsN) && fsN >= CV_FRONTAL_THRESHOLD);
+              this.cvFpIsFrontal = frontalBool;
+              if (this.cvServoAutoMode === "gaze" && !frontalBool) {
+                this._cvGazeClearFollowDebounce();
+              }
+              const cf = meta.confidence;
+              const cfN = cf != null ? Number(cf) : NaN;
+              this.cvFpConfidence = Number.isFinite(cfN) ? cfN : null;
+              this.cvFpPoints = Array.isArray(meta.points) ? meta.points : [];
+            } else {
+              if (this.cvServoAutoMode === "gaze") this._cvGazeClearFollowDebounce();
+              this.cvFpFrontalScore = null;
+              this.cvFpIsFrontal = false;
+              this.cvFpConfidence = null;
+              this.cvFpPoints = [];
+            }
+          } else {
+            this.cvLastSize = blob.size || 0;
+            this.cvLandmarks = [];
+            this.cvYawDeg = null;
+            this.cvPitchDeg = null;
+            this.cvIrisLeft = null;
+            this.cvIrisRight = null;
+            this.cvFpFrontalScore = null;
+            this.cvFpIsFrontal = false;
+            this.cvFpConfidence = null;
+            this.cvFpPoints = [];
+          }
+          this.cvLastRecv = new Date().toLocaleTimeString();
+          this.cvFrameCount += 1;
+        },
+        cvConnect() {
+          this.cvError = ""; this.cvStatus = "连接中…";
+          try {
+            const ws = new WebSocket(this.cvWsUrl);
+            ws.binaryType = "blob";
+            this.cvWs = ws;
+            ws.onopen = () => { this.cvConnected = true; this.cvStatus = "已连接"; };
+            ws.onclose = () => {
+              this.cvConnected = false; this.cvStatus = "已断开";
+              if (!this._cvManualDisconnect) {
+                clearTimeout(this._cvReconnectTimer);
+                this._cvReconnectTimer = setTimeout(() => this.cvConnect(), 2000);
+              }
+              this._cvManualDisconnect = false;
+            };
+            ws.onerror = () => {
+              this.cvStatus = "连接错误";
+              this.cvError = "camera_view 连接失败";
+            };
+            ws.onmessage = (ev) => this.cvOnMsg(ev);
+          } catch (e) { this.cvStatus = "连接失败"; this.cvError = String(e?.message || e); }
+        },
+        cvDisconnect() {
+          this._cvManualDisconnect = true;
+          if (this._cvReconnectTimer) { clearTimeout(this._cvReconnectTimer); this._cvReconnectTimer = null; }
+          if (this.cvWs) { try { this.cvWs.close(); } catch (e) {} } this.cvWs = null;
+          this.cvConnected = false;
+        },
+
+        reconnect() {
+          this.dpClear();
+          this.dpDisconnect();
+          this.cvResetView();
+          this.cvDisconnect();
+          setTimeout(() => { this.dpConnect(); this.cvConnect(); }, 50);
+        },
+      },
+      watch: {
+        selected() {
+          this.cvServoAutoMode = "";
+          this._cvFollowLastIx = null;
+          this._cvFollowLastIy = null;
+          this._cvFollowLastSendMs = 0;
+          this._cvFollowLastSmileMs = 0;
+          this.reconnect();
+        },
+      },
+      async mounted() {
+        this._cvLastFpsSample = { ts: Date.now(), count: 0 };
+        this._cvFpsTimer = setInterval(() => {
+          const now = Date.now();
+          const dt = (now - this._cvLastFpsSample.ts) / 1000;
+          if (dt > 0) this.cvFps = (this.cvFrameCount - this._cvLastFpsSample.count) / dt;
+          this._cvLastFpsSample = { ts: now, count: this.cvFrameCount };
+        }, 1000);
+
+        await this.refreshDevices();
+        this.ttsLoadHistory();
+        this.dpConnect();
+        this.cvConnect();
+        this._cvFollowTickTimer = setInterval(() => this._cvTickFollowServo(), 90);
+        void this.cvFetchVoiceAutoReply();
+      },
+      unmounted() {
+        if (this._cvFpsTimer) clearInterval(this._cvFpsTimer);
+        if (this._cvFollowTickTimer) clearInterval(this._cvFollowTickTimer);
+        if (this._cvServoStatusTimer) clearTimeout(this._cvServoStatusTimer);
+        if (this._manualServoStatusTimer) clearTimeout(this._manualServoStatusTimer);
+        this.dpDisconnect();
+        this.cvDisconnect();
+        if (this.cvImgUrl) { try { URL.revokeObjectURL(this.cvImgUrl); } catch (e) {} }
+      },
+    }).mount("#app");
+  </script>
+  {% endraw %}
+{% endblock %}

@@ -1,0 +1,86 @@
+# 服务端 /camera 人脸检测（MediaPipe）：阈值越低越易检出（小脸/侧脸/略糊），但误检略增；可用环境变量覆盖见 camera_undistort.py 顶部
+camera_face:
+  min_face_detection_confidence: 0.15
+  min_face_presence_confidence: 0.15
+  undistort:
+    enabled: false
+    # 与下方 camera_matrix 对应的标定分辨率；或与 calibration_json 内宽高一致
+    calib_width: 640
+    calib_height: 480
+    # OpenCV 标定输出的 JSON（示例见 deskbot-server/camera_undistort.py 顶部注释）
+    # calibration_json: /path/to/calib.json
+    # 也可不写文件，直接在 YAML 填 3×3 camera_matrix 与 dist_coeffs: [k1,k2,p1,p2,k3]
+    alpha: 1.0
+
+server:
+  host: 0.0.0.0
+  # 调试页生成的 ws:// / http:// 基址主机；不设则 0.0.0.0/127 时用浏览器当前 Host。可被 DESKBOT_WEB_PUBLIC_HOST 覆盖。
+  # web_public_host:
+  port: 9000
+  ws_path: /asr_chat
+  # WebSocket 保活（秒）；ESP32 等若未及时处理协议层 ping，过短会 1011 断开
+  # 也可用环境变量覆盖：DESKBOT_WS_PING_INTERVAL / DESKBOT_WS_PING_TIMEOUT；设为 0 关闭 ping
+  ws_ping_interval: 120
+  ws_ping_timeout: 300
+  # 是否向同 device 的 /asr_chat 连接转发 face_info（旧协议）。默认 false；恢复：true 或 DESKBOT_SEND_FACE_INFO=1
+  send_face_info_to_asr_chat: false
+  # 为 true：/asr_chat 对设备仅下发 pb_*（及 pb 要求的紧随 binary PCM），不发 ready/pong/阶段 JSON；与 send_face_info_to_asr_chat 互斥（为 true 时强制关 face_info）。关：false 或 DESKBOT_ASR_CHAT_DEVICE_PB_ONLY=0
+  asr_chat_device_pb_only: true
+  # 为 true 时：不向设备下发 asr_*/llm_text/actions 等阶段 JSON（仍广播 pipeline_stage）；仅 pb + ready/pong/error/tts_error（若未启用 asr_chat_device_pb_only）
+  asr_chat_minimal_device_downlink: false
+  # /asr_chat 成功下行空闲达该秒数后，自动 opportunistic 下发场景（默认 sleep_snore）；0 关闭。
+  # 与 /camera：该 device_id 最近帧 is_frontal（正脸）时刷新计时且不下发打盹（虹膜不参与此项）。
+  pb_idle_snore_sec: 5
+  # pb_idle_snore_scene: sleep_snore
+
+audio:
+  # opus | pcm16
+  input_codec: opus
+  sample_rate: 16000
+  channels: 1
+
+vad:
+  # webrtcvad mode: 0(least aggressive) ~ 3(most aggressive)
+  mode: 3
+  frame_ms: 30
+  min_speech_ms: 250
+  max_silence_ms: 500
+  pre_speech_ms: 300
+
+asr:
+  # 本地开发用 .env 的 ASR_MODEL_DIR=./models/SenseVoiceSmall；Docker 可设 /app/models/SenseVoiceSmall
+  model_dir: ""
+  hub: hf
+  language: zh
+  text_filter:
+    min_text_len: 4
+    min_chinese_ratio: 0.0
+
+llm:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model_name: qwen-flash
+  system_prompt_file: prompts/llm_system.txt
+
+tts:
+  # PaddleSpeech 流式 TTS；服务端配置见 ../paddlespeech-server/conf/tts_online_application.yaml
+  # 启动：仓库根目录 ./start.sh（同时起 Paddle TTS + deskbot-server）
+  ws_url: ws://127.0.0.1:8092/paddlespeech/tts/streaming
+  spk_id: 0
+  sample_rate: 24000
+  # TTS 仅支持 pb：链式 pb_start/chunk/end，或单片 pb_single + 二进制 PCM（anim/servo），需 PaddleSpeech streaming_phoneme
+  # pb 卡通脸：default | demo（试玩：快眨眼、鼻三态、口型脸偏移）。也可用 DESKBOT_PB_FACE_BUNDLE=demo
+  # pb_face_bundle: demo
+  # 主配置 JSON/YAML（完整动画数据，保存即热重载）：也可用 DESKBOT_PB_FACE_BUNDLE_JSON
+  pb_face_bundle_json: data/pb_face_bundle_demo.json
+  # 在 profile 或 json 主配置之上再叠一层（路径相对 deskbot-server）。也可用 DESKBOT_PB_FACE_BUNDLE_FILE
+  # pb_face_bundle_file: data/pb_face_bundle_demo_overlay.yaml
+  # pb 模式下随机附加舵机相对位移（xm=ym=1）；默认关。开：enabled: true 或 DESKBOT_PB_RANDOM_SERVO=1
+  pb_random_servo:
+    enabled: false
+    probability: 0.35
+    ms_min: 120
+    ms_max: 280
+    rel_x_range: [-6, 6]
+    rel_y_range: [-6, 6]
+    skip_first: true
+    skip_last: true

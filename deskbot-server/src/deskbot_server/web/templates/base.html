@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{% block page_title %}Deskbot Server{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #f5f5f7;
+      --sidebar-bg: #1c1c1e;
+      --sidebar-text: #f5f5f7;
+      --sidebar-muted: #98989d;
+      --accent: #0a84ff;
+      --main-border: #d2d2d7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background: var(--bg);
+    }
+    .layout-sidebar {
+      width: 220px;
+      min-height: 100vh;
+      background: var(--sidebar-bg);
+      color: var(--sidebar-text);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: width 0.2s ease, margin 0.2s ease;
+    }
+    body.layout-collapsed .layout-sidebar { width: 56px; }
+    .layout-brand {
+      padding: 18px 16px;
+      font-weight: 600;
+      font-size: 1.05rem;
+      letter-spacing: 0.02em;
+      border-bottom: 1px solid #3a3a3c;
+    }
+    body.layout-collapsed .layout-brand {
+      font-size: 0;
+      padding: 16px 8px;
+    }
+    body.layout-collapsed .layout-brand::after {
+      content: "B";
+      font-size: 1.1rem;
+    }
+    .layout-toggle {
+      margin: 8px 12px;
+      padding: 6px 10px;
+      border: 1px solid #48484a;
+      border-radius: 6px;
+      background: #2c2c2e;
+      color: var(--sidebar-text);
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .layout-toggle:hover { background: #3a3a3c; }
+    .layout-nav {
+      flex: 1;
+      padding: 8px 0 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .layout-nav a {
+      padding: 10px 20px;
+      color: var(--sidebar-muted);
+      text-decoration: none;
+      font-size: 14px;
+      border-left: 3px solid transparent;
+    }
+    .layout-nav a:hover { color: #fff; background: rgba(255,255,255,0.06); }
+    .layout-nav a.active { color: #fff; border-left-color: var(--accent); }
+    body.layout-collapsed .layout-nav a { padding: 10px; text-align: center; }
+    body.layout-collapsed .layout-nav a span.full { display: none; }
+    .layout-nav a span.short { display: none; font-size: 13px; }
+    body.layout-collapsed .layout-nav a span.short { display: block; }
+    .layout-main {
+      flex: 1;
+      min-width: 0;
+      padding: 20px 24px 32px;
+    }
+    h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 16px; }
+    .card {
+      background: #fff;
+      border: 1px solid var(--main-border);
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+  </style>
+  {% block extra_head %}{% endblock %}
+</head>
+<body>
+  <aside class="layout-sidebar" aria-label="侧栏">
+    <div class="layout-brand">Deskbot Server</div>
+    <button type="button" class="layout-toggle" id="layoutToggle" title="展开/收起侧栏">‹ 收起</button>
+    <nav class="layout-nav">
+      <a href="{{ url_for('debug_online') }}" class="{% if active_nav == 'online' %}active{% endif %}">
+        <span class="full">在线调试</span>
+        <span class="short" title="在线调试">线</span>
+      </a>
+      <a href="{{ url_for('debug_devices') }}" class="{% if active_nav == 'devices' %}active{% endif %}">
+        <span class="full">设备调试</span>
+        <span class="short" title="设备调试">设</span>
+      </a>
+      <a href="{{ url_for('debug_llm') }}" class="{% if active_nav == 'llm' %}active{% endif %}">
+        <span class="full">LLM 调试</span>
+        <span class="short" title="LLM 调试">L</span>
+      </a>
+      <a href="{{ url_for('debug_paddlespeech') }}" class="{% if active_nav == 'paddle' %}active{% endif %}">
+        <span class="full">PaddleSpeech 调试</span>
+        <span class="short" title="PaddleSpeech 调试">P</span>
+      </a>
+      <a href="{{ url_for('debug_simulation') }}" class="{% if active_nav == 'sim' %}active{% endif %}">
+        <span class="full">仿真调试</span>
+        <span class="short" title="仿真调试">仿</span>
+      </a>
+      <a href="{{ url_for('settings') }}" class="{% if active_nav == 'settings' %}active{% endif %}">
+        <span class="full">系统配置</span>
+        <span class="short" title="系统配置">配</span>
+      </a>
+    </nav>
+  </aside>
+  <main class="layout-main">
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    (function () {
+      const KEY = "botserver_sidebar_collapsed";
+      function apply(c) {
+        document.body.classList.toggle("layout-collapsed", c);
+        const btn = document.getElementById("layoutToggle");
+        if (btn) btn.textContent = c ? "› 展开" : "‹ 收起";
+      }
+      const saved = localStorage.getItem(KEY);
+      apply(saved === "1" ? true : false);
+      if (saved === null) { apply(false); localStorage.setItem(KEY, "0"); }
+      document.getElementById("layoutToggle")?.addEventListener("click", function () {
+        const next = !document.body.classList.contains("layout-collapsed");
+        localStorage.setItem(KEY, next ? "1" : "0");
+        apply(next);
+      });
+    })();
+  </script>
+  {% block extra_js %}{% endblock %}
+</body>
+</html>

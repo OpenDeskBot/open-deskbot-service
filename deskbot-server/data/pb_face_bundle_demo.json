@@ -1,0 +1,929 @@
+      
+{
+  "schema_version": 1,
+  "_comment": "TTS 首页（/）像素人脸转换为 PB face_bundle，画布 128x64；2026-05 口型改为中心锚点并将嘴巴/牙齿/舌头左对齐加宽 20%。",
+  "mouth_by_phoneme": {},
+  "eye_l": {
+    "default": [
+      {
+        "shape": "ellipse_fill",
+        "x": 40,
+        "y": 12,
+        "rw": 4,
+        "rh": 4
+      }
+    ],
+    "open": [
+      {
+        "shape": "ellipse_fill",
+        "x": 40,
+        "y": 10,
+        "rw": 6,
+        "rh": 6
+      }
+    ],
+    "close": [
+      {
+        "shape": "ellipse_fill",
+        "x": 40,
+        "y": 10,
+        "rw": 5,
+        "rh": 1
+      }
+    ]
+  },
+  "eye_r": {
+    "default": [
+      {
+        "shape": "ellipse_fill",
+        "x": 80,
+        "y": 12,
+        "rw": 4,
+        "rh": 4
+      }
+    ],
+    "open": [
+      {
+        "shape": "ellipse_fill",
+        "x": 80,
+        "y": 10,
+        "rw": 6,
+        "rh": 6
+      }
+    ],
+    "close": [
+      {
+        "shape": "ellipse_fill",
+        "x": 80,
+        "y": 10,
+        "rw": 5,
+        "rh": 1
+      }
+    ]
+  },
+  "nose": {
+    "default": []
+  },
+  "extra": {
+    "default": [],
+    "playful": [
+      {
+        "shape": "circle",
+        "x": 8,
+        "y": 8,
+        "r": 3
+      },
+      {
+        "shape": "circle",
+        "x": 120,
+        "y": 8,
+        "r": 3
+      }
+    ]
+  },
+  "metadata": {
+    "blink": {
+      "open_ms": 2300,
+      "close_ms": 180
+    },
+    "extra_state": "default"
+  },
+  "mouth_by_phoneme_groups": [
+    {
+      "states": [
+        "i1",
+        "i2",
+        "i3",
+        "i4",
+        "i5",
+        "ia1",
+        "ia2",
+        "ia3",
+        "ia4",
+        "ia5",
+        "ian1",
+        "ian2",
+        "ian3",
+        "ian4",
+        "ian5",
+        "iang1",
+        "iang2",
+        "iang3",
+        "iang4",
+        "iang5",
+        "iao1",
+        "iao2",
+        "iao3",
+        "iao4",
+        "iao5",
+        "ie1",
+        "ie2",
+        "ie3",
+        "ie4",
+        "ie5",
+        "in1",
+        "in2",
+        "in3",
+        "in4",
+        "in5",
+        "ing1",
+        "ing2",
+        "ing3",
+        "ing4",
+        "ing5",
+        "iong1",
+        "iong2",
+        "iong3",
+        "iong4",
+        "iong5",
+        "iou1",
+        "iou2",
+        "iou3",
+        "iou4",
+        "iou5",
+        "iu1",
+        "iu2",
+        "iu3",
+        "iu4",
+        "iu5"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 55,
+          "y": 44,
+          "w": 43,
+          "h": 7,
+          "radius": 1
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 56,
+          "y": 45,
+          "w": 42,
+          "h": 6,
+          "radius": 1
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "u1",
+        "u2",
+        "u3",
+        "u4",
+        "u5",
+        "ua1",
+        "ua2",
+        "ua3",
+        "ua4",
+        "ua5",
+        "uan1",
+        "uan2",
+        "uan3",
+        "uan4",
+        "uan5",
+        "uang1",
+        "uang2",
+        "uang3",
+        "uang4",
+        "uang5",
+        "uo1",
+        "uo2",
+        "uo3",
+        "uo4",
+        "uo5",
+        "v1",
+        "v2",
+        "v3",
+        "v4",
+        "v5",
+        "ve1",
+        "ve2",
+        "ve3",
+        "ve4",
+        "ve5"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 65,
+          "y": 38,
+          "w": 18,
+          "h": 14,
+          "radius": 7
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 66,
+          "y": 39,
+          "w": 17,
+          "h": 13,
+          "radius": 6
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": -2
+      }
+    },
+    {
+      "states": [
+        "a1",
+        "a2",
+        "a3",
+        "a4",
+        "a5",
+        "an1",
+        "an2",
+        "an3",
+        "an4",
+        "an5",
+        "ang1",
+        "ang2",
+        "ang3",
+        "ang4",
+        "ang5"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 61,
+          "y": 38,
+          "w": 30,
+          "h": 15,
+          "radius": 7
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 62,
+          "y": 39,
+          "w": 29,
+          "h": 14,
+          "radius": 6
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": -2
+      }
+    },
+    {
+      "states": [
+        "ai1",
+        "ai2",
+        "ai3",
+        "ai4",
+        "ai5",
+        "uai1",
+        "uai2",
+        "uai3",
+        "uai4",
+        "uai5"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 59,
+          "y": 36,
+          "w": 32,
+          "h": 18,
+          "radius": 8
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 60,
+          "y": 37,
+          "w": 30,
+          "h": 17,
+          "radius": 8
+        }
+      ],
+      "offset": {
+        "x": -2,
+        "y": -4
+      }
+    },
+    {
+      "states": [
+        "ao1",
+        "ao2",
+        "ao3",
+        "ao4",
+        "ao5"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 59,
+          "y": 34,
+          "w": 34,
+          "h": 21,
+          "radius": 8
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 60,
+          "y": 35,
+          "w": 32,
+          "h": 20,
+          "radius": 8
+        }
+      ],
+      "offset": {
+        "x": 2,
+        "y": -4
+      }
+    },
+    {
+      "states": [
+        "o1",
+        "o2",
+        "o3",
+        "o4",
+        "o5",
+        "e1",
+        "e2",
+        "e3",
+        "e4",
+        "e5",
+        "ei1",
+        "ei2",
+        "ei3",
+        "ei4",
+        "ei5",
+        "en1",
+        "en2",
+        "en3",
+        "en4",
+        "en5",
+        "eng1",
+        "eng2",
+        "eng3",
+        "eng4",
+        "eng5",
+        "er1",
+        "er2",
+        "er3",
+        "er4",
+        "er5",
+        "ong1",
+        "ong2",
+        "ong3",
+        "ong4",
+        "ong5"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 57,
+          "y": 40,
+          "w": 37,
+          "h": 13,
+          "radius": 6
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 58,
+          "y": 41,
+          "w": 35,
+          "h": 11,
+          "radius": 5
+        }
+      ],
+      "offset": {
+        "x": 2,
+        "y": -2
+      }
+    },
+    {
+      "states": [
+        "ou1",
+        "ou2",
+        "ou3",
+        "ou4",
+        "ou5"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 63,
+          "y": 38,
+          "w": 24,
+          "h": 15,
+          "radius": 7
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 64,
+          "y": 39,
+          "w": 22,
+          "h": 14,
+          "radius": 6
+        }
+      ],
+      "offset": {
+        "x": -2,
+        "y": -2
+      }
+    },
+    {
+      "states": [
+        "b",
+        "p",
+        "m"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 57,
+          "y": 48,
+          "w": 37,
+          "h": 3,
+          "radius": 1
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 58,
+          "y": 49,
+          "w": 35,
+          "h": 2,
+          "radius": 1
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "f"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 57,
+          "y": 44,
+          "w": 37,
+          "h": 7,
+          "radius": 1
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 58,
+          "y": 45,
+          "w": 35,
+          "h": 6,
+          "radius": 1
+        },
+        {
+          "shape": "rect",
+          "x": 62,
+          "y": 45,
+          "w": 26,
+          "h": 2
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "d",
+        "t"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 59,
+          "y": 44,
+          "w": 34,
+          "h": 7,
+          "radius": 1
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 60,
+          "y": 45,
+          "w": 32,
+          "h": 6,
+          "radius": 1
+        },
+        {
+          "shape": "rect",
+          "x": 63,
+          "y": 45,
+          "w": 24,
+          "h": 2
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "n"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 59,
+          "y": 44,
+          "w": 35,
+          "h": 8,
+          "radius": 3
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 60,
+          "y": 45,
+          "w": 34,
+          "h": 7,
+          "radius": 2
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "l"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 59,
+          "y": 42,
+          "w": 34,
+          "h": 10,
+          "radius": 3
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 60,
+          "y": 43,
+          "w": 32,
+          "h": 8,
+          "radius": 2
+        },
+        {
+          "shape": "triangle_fill",
+          "x0": 73,
+          "y0": 52,
+          "x1": 78,
+          "y1": 46,
+          "x2": 83,
+          "y2": 52
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "g",
+        "k"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 62,
+          "y": 40,
+          "w": 26,
+          "h": 13,
+          "radius": 4
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 63,
+          "y": 41,
+          "w": 25,
+          "h": 11,
+          "radius": 4
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "h"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 61,
+          "y": 36,
+          "w": 30,
+          "h": 18,
+          "radius": 7
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 62,
+          "y": 37,
+          "w": 29,
+          "h": 17,
+          "radius": 6
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "j",
+        "q",
+        "x"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 59,
+          "y": 42,
+          "w": 34,
+          "h": 10,
+          "radius": 3
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 60,
+          "y": 43,
+          "w": 32,
+          "h": 8,
+          "radius": 2
+        },
+        {
+          "shape": "rect",
+          "x": 64,
+          "y": 43,
+          "w": 22,
+          "h": 2
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "zh"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 61,
+          "y": 38,
+          "w": 30,
+          "h": 13,
+          "radius": 6
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 62,
+          "y": 39,
+          "w": 29,
+          "h": 11,
+          "radius": 5
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "ch"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 59,
+          "y": 44,
+          "w": 32,
+          "h": 8,
+          "radius": 3
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 60,
+          "y": 45,
+          "w": 30,
+          "h": 7,
+          "radius": 2
+        },
+        {
+          "shape": "rect",
+          "x": 64,
+          "y": 45,
+          "w": 22,
+          "h": 2
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "sh"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 61,
+          "y": 40,
+          "w": 29,
+          "h": 11,
+          "radius": 6
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 62,
+          "y": 41,
+          "w": 26,
+          "h": 10,
+          "radius": 5
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "r"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 65,
+          "y": 40,
+          "w": 20,
+          "h": 11,
+          "radius": 4
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 66,
+          "y": 41,
+          "w": 18,
+          "h": 10,
+          "radius": 4
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "z",
+        "c",
+        "s"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 57,
+          "y": 44,
+          "w": 38,
+          "h": 7,
+          "radius": 1
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 58,
+          "y": 45,
+          "w": 37,
+          "h": 6,
+          "radius": 1
+        },
+        {
+          "shape": "rect",
+          "x": 62,
+          "y": 45,
+          "w": 26,
+          "h": 2
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "w"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 64,
+          "y": 38,
+          "w": 22,
+          "h": 13,
+          "radius": 6
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 65,
+          "y": 39,
+          "w": 20,
+          "h": 11,
+          "radius": 5
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "y"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 55,
+          "y": 44,
+          "w": 42,
+          "h": 7,
+          "radius": 1
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 56,
+          "y": 45,
+          "w": 41,
+          "h": 6,
+          "radius": 1
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "states": [
+        "_",
+        "sil",
+        "sp",
+        "sp1",
+        "sp2",
+        "sp3",
+        "sp4",
+        "spl",
+        "spn"
+      ],
+      "elements": [
+        {
+          "shape": "round_rect_outline",
+          "x": 62,
+          "y": 44,
+          "w": 26,
+          "h": 7,
+          "radius": 1
+        },
+        {
+          "shape": "round_rect_outline",
+          "x": 63,
+          "y": 45,
+          "w": 25,
+          "h": 6,
+          "radius": 1
+        }
+      ],
+      "offset": {
+        "x": 0,
+        "y": 0
+      }
+    }
+  ]
+}
+
+    
