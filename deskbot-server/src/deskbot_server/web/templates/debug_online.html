@@ -36,15 +36,11 @@
                 <div class="ts" v-if="t.asrMs != null && t.userSource === 'asr'">ASR: {{ t.asrMs }} ms</div>
               </div>
               <div
-                v-if="t.assistantText || t.audioUrl || t.ttsErr || t.srvErr || (t.actions && t.actions.length)"
+                v-if="t.assistantText || t.audioUrl || t.ttsErr || t.srvErr"
                 class="bubble bubble-assistant"
               >
                 <div class="src">助手</div>
                 <div v-if="t.assistantText" class="txt">{{ t.assistantText }}</div>
-                <div v-if="t.actions && t.actions.length" class="actions-row">
-                  <span class="lbl">动作</span>
-                  <span v-for="a in t.actions" :key="a" class="action-chip">{{ a }}</span>
-                </div>
                 <div v-if="t.ttsErr" class="err-line">TTS: {{ t.ttsErr }}</div>
                 <div v-if="t.srvErr" class="err-line">错误: {{ t.srvErr }}</div>
                 <div v-if="t.audioUrl" class="row-audio">
@@ -304,13 +300,6 @@
             if (this.activeTurn) {
               this.activeTurn.assistantText = d.text || "";
               this.activeTurn.llmMs = this.ms(this._tAsrText, tmono);
-              if (Array.isArray(d.actions)) this.activeTurn.actions = d.actions;
-            }
-            return;
-          }
-          if (d.type === "actions") {
-            if (this.activeTurn) {
-              this.activeTurn.actions = Array.isArray(d.actions) ? d.actions : [];
             }
             return;
           }

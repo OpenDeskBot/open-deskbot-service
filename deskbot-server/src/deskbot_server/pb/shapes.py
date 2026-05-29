@@ -10,14 +10,46 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
-# pb 下行 ``action``（见 ``docs/esp32_playback_protocol.md``）
+# pb 下行 ``action`` / ``level``（见 ``docs/esp32_playback_protocol.md``）
 PB_ACTION_REPLACE = "replace"
 PB_ACTION_APPEND = "append"
-PB_ACTION_OPPORTUNISTIC = "opportunistic"
+PB_ACTION_DEFAULT = "default"
+
+PB_LEVEL_IDLE = 0
+PB_LEVEL_TASK = 1
+PB_LEVEL_EMERGENCY = 2
+PB_LEVEL_DEBUG = 3
+
+
+def apply_pb_dispatch_fields(
+    frames: list[dict[str, Any]],
+    *,
+    action: str,
+    level: int,
+) -> None:
+    """为 pb 链各分片写入统一的 ``action`` / ``level``。"""
+    for one in frames:
+        one["action"] = action
+        one["level"] = int(level)
+
+
+_PAUSE_PHONEME_ALIASES = frozenset({"sil", "sp", "spl", "spn", "sp1", "sp2", "sp3", "sp4"})
+
+
+def simplify_phoneme_key(ph: str) -> str:
+    """口型查表键：去末尾声调 1–5；``sp1`` 等停顿标记归一为 ``_``。"""
+    p = str(ph or "").strip()
+    if not p or p == "_":
+        return "_"
+    low = p.lower()
+    if low in _PAUSE_PHONEME_ALIASES:
+        return "_"
+    if len(p) >= 2 and p[-1] in "12345" and p[-2].isalpha():
+        return p[:-1]
+    return p
 
 
 def enumerate_zh_phonemes() -> list[str]:
-    tones = ["1", "2", "3", "4", "5"]
     finals = [
         "a",
         "o",
@@ -81,10 +113,9 @@ def enumerate_zh_phonemes() -> list[str]:
         "y",
         "w",
     ]
-    s: set[str] = {"_", "sil", "sp", "spl", "spn", "sp1", "sp2", "sp3", "sp4"}
+    s: set[str] = {"_", "sil"}
     for f in finals:
-        for t in tones:
-            s.add(f + t)
+        s.add(f)
     for ini in initials:
         s.add(ini)
 
@@ -97,41 +128,27 @@ def enumerate_zh_phonemes() -> list[str]:
 
 
 def default_mouth_rect_for_phoneme(ph: str) -> list[dict[str, Any]]:
+    ph = simplify_phoneme_key(ph)
     cx = 64
     y0 = 44
     closed_h = 4
     open_h = 15
     mid_h = 9
-    if ph in ("_", "sil", "spl", "spn", "sp") or re.match(r"^sp[1-4]$", ph or ""):
+    if ph in ("_", "sil"):
         w, h = 30, closed_h
         return [{"shape": "rect", "x": round(cx - w / 2), "y": 52, "w": w, "h": h}]
-    if ph and ph[-1] in "12345":
-        tone = ph[-1]
-        body = ph[:-1]
-        h = mid_h
-        if tone in ("1", "2"):
-            h = open_h
-        elif tone == "3":
-            h = open_h + 3
-        elif tone == "4":
-            h = open_h - 2
-        else:
-            h = mid_h - 1
-        w = 32
-        if re.match(r"^(a|o|e|ai|ei|ao|ou|er)", body):
-            w = 40
-        if re.match(r"^(i|u|v)", body):
-            w = 26
-        return [
-            {
-                "shape": "rect",
-                "x": round(cx - w / 2),
-                "y": y0,
-                "w": w,
-                "h": max(4, round(h)),
-            }
-        ]
-    w, h = 14, mid_h
+    if ph in (
+        "a", "o", "e", "ai", "ei", "ao", "ou", "er", "ua", "uo", "uai", "uei",
+    ):
+        w, h = 40, open_h
+        return [{"shape": "rect", "x": round(cx - w / 2), "y": y0, "w": w, "h": h}]
+    if ph.startswith(("i", "u", "v")) or ph in ("iu", "ui", "ve"):
+        w, h = 26, mid_h
+        return [{"shape": "rect", "x": round(cx - w / 2), "y": y0, "w": w, "h": h}]
+    if len(ph) <= 2:
+        w, h = 14, mid_h
+        return [{"shape": "rect", "x": round(cx - w / 2), "y": y0, "w": w, "h": h}]
+    w, h = 32, mid_h
     return [{"shape": "rect", "x": round(cx - w / 2), "y": y0, "w": w, "h": h}]
 
 

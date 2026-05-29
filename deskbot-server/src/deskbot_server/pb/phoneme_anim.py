@@ -14,6 +14,7 @@ from deskbot_server.pb.shapes import (
     _normalize_offset,
     apply_offset_to_primitives,
     expand_mouth_by_phoneme,
+    simplify_phoneme_key,
 )
 
 def phoneme_seq_to_anim_seq(
@@ -73,7 +74,10 @@ def phoneme_seq_to_anim_seq(
     for idx, seg in enumerate(segments or []):
         ph = str(seg.get("phoneme") or "").strip()
         chunk_ms = int(seg.get("ms") or 0)
+        lookup = simplify_phoneme_key(ph)
         raw_mouth = mouth_by.get(ph)
+        if raw_mouth is None and lookup != ph:
+            raw_mouth = mouth_by.get(lookup)
         if raw_mouth is None:
             raw_mouth = mouth_by.get("_")
         mouth_entry = _normalize_mouth_entry(raw_mouth if raw_mouth is not None else fb_mouth)

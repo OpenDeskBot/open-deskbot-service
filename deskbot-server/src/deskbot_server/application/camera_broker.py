@@ -76,10 +76,14 @@ class CameraImageBroker:
         yaw_deg: Optional[float] = None,
         pitch_deg: Optional[float] = None,
         iris_offsets: Optional[dict] = None,
+        face_score: Optional[float] = None,
         frontal_score: Optional[float] = None,
         is_frontal: Optional[bool] = None,
         confidence: Optional[float] = None,
         points: Optional[list] = None,
+        faces: Optional[list] = None,
+        face_count: Optional[int] = None,
+        face_id: Optional[int] = None,
     ) -> tuple:
         if not frame:
             return 0, 0
@@ -118,6 +122,11 @@ class CameraImageBroker:
                     continue
             if sanitized:
                 meta["iris_offsets"] = sanitized
+        if face_score is not None:
+            try:
+                meta["face_score"] = float(face_score)
+            except (TypeError, ValueError):
+                pass
         if frontal_score is not None:
             try:
                 meta["frontal_score"] = float(frontal_score)
@@ -132,6 +141,18 @@ class CameraImageBroker:
                 pass
         if points:
             meta["points"] = points
+        if face_count is not None:
+            try:
+                meta["face_count"] = int(face_count)
+            except (TypeError, ValueError):
+                pass
+        if face_id is not None:
+            try:
+                meta["face_id"] = int(face_id)
+            except (TypeError, ValueError):
+                pass
+        if faces:
+            meta["faces"] = faces
         meta_json = json.dumps(meta, ensure_ascii=False)
         async with self._lock:
             self._last_by_device[device_id] = (meta_json, frame)

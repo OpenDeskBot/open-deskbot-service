@@ -28,6 +28,7 @@ class ServerSettings:
     send_face_info_to_asr_chat: bool = False
     pb_idle_snore_sec: float = 5.0
     pb_idle_snore_scene: str = "sleep_snore"
+    pb_idle_silence_sec: float = 2.0
     web_public_host: str = ""
 
 
@@ -144,6 +145,14 @@ class AppSettings:
         if "DESKBOT_PB_IDLE_SNORE_SCENE" in os.environ:
             idle_scene = (os.environ.get("DESKBOT_PB_IDLE_SNORE_SCENE") or "sleep_snore").strip()
 
+        idle_silence_sec = srv.get("pb_idle_silence_sec", 2)
+        if "DESKBOT_PB_IDLE_SILENCE_SEC" in os.environ:
+            raw_silence = str(os.environ.get("DESKBOT_PB_IDLE_SILENCE_SEC", "")).strip()
+            try:
+                idle_silence_sec = float(raw_silence) if raw_silence else 0.0
+            except ValueError:
+                pass
+
         return cls(
             server=ServerSettings(
                 host=os.environ.get("DESKBOT_SERVER_HOST") or str(srv.get("host", "0.0.0.0")),
@@ -161,6 +170,7 @@ class AppSettings:
                 send_face_info_to_asr_chat=face_info and not pb_only,
                 pb_idle_snore_sec=max(0.0, float(idle_sec)),
                 pb_idle_snore_scene=idle_scene or "sleep_snore",
+                pb_idle_silence_sec=max(0.0, float(idle_silence_sec)),
                 web_public_host=str(srv.get("web_public_host") or ""),
             ),
             audio=AudioSettings(

@@ -12,11 +12,15 @@ from websockets.exceptions import ConnectionClosed
 
 from deskbot_server.application.camera_broker import CameraImageBroker
 from deskbot_server.application.camera_frame import (
-    analyze_face_detection,
+    analyze_face_detections,
     build_face_info_message,
     build_face_pos_payload,
 )
+from deskbot_server.application.camera_servo_follower import camera_servo_follower_tick
 from deskbot_server.application.face_detector import CameraFaceDetector
+from deskbot_server.application.face_tracker import FaceTracker
+from deskbot_server.face_identity import attach_descriptors_to_faces, deduplicate_overlapping_faces
+from deskbot_server.face_snapshot_cache import update_device_faces
 from deskbot_server.util import (
     _extract_device_id,
     _json_msg,
@@ -65,9 +69,12 @@ async def handle_camera(
     try:
         detector = await asyncio.to_thread(
             CameraFaceDetector,
+            num_faces=camera_face_runtime.num_faces,
             undistorter=camera_face_runtime.undistorter,
             min_face_detection_confidence=camera_face_runtime.min_face_detection_confidence,
             min_face_presence_confidence=camera_face_runtime.min_face_presence_confidence,
+            frame_width=camera_face_runtime.frame_width,
+            frame_height=camera_face_runtime.frame_height,
         )
     except Exception as exc:
         detail = str(exc)
@@ -91,8 +98,8 @@ async def handle_camera(
             {
                 "type": "ready",
                 "channel": "camera",
-                "width": FACE_FRAME_WIDTH,
-                "height": FACE_FRAME_HEIGHT,
+                "width": camera_face_runtime.frame_width,
+                "height": camera_face_runtime.frame_height,
                 "keypoints": list(FACE_KEYPOINT_NAMES),
                 "device_id": url_device,
                 "expects": "binary JPEG frames (no per-frame camera_ack)",
@@ -102,6 +109,53 @@ async def handle_camera(
 
     logger.info("[/camera] 生产者接入 device_id=%s peer=%s", url_device, peer)
     await registry.connect(url_device, "camera", websocket)
+
+    if camera_face_runtime.face_embedding_enabled:
+        try:
+            from deskbot_server.vision.face_embedding import get_face_embedding_engine
+
+            await asyncio.to_thread(get_face_embedding_engine)
+        except Exception as exc:
+            logger.warning("[/camera] InsightFace 预加载失败 device_id=%s: %s", url_device, exc)
+
+    face_tracker = FaceTracker(
+        max_dist_px=camera_face_runtime.face_track_max_dist_px,
+        max_lost_frames=camera_face_runtime.face_track_max_lost_frames,
+        identity_similarity_threshold=camera_face_runtime.identity_similarity_threshold,
+        identity_geometry_threshold=camera_face_runtime.identity_geometry_threshold,
+    )
+    try:
+        from deskbot_server.face_profiles_store import load_face_profiles
+        from deskbot_server.face_identity import is_embedding_vector
+        from deskbot_server.vision.face_embedding import get_face_embedding_engine
+
+        profs = load_face_profiles()
+        geo_n = sum(
+            1
+            for p in profs
+            if isinstance(p.get("descriptor"), list) and not is_embedding_vector(p["descriptor"])
+        )
+        emb_n = len(profs) - geo_n
+        eng = get_face_embedding_engine()
+        logger.info(
+            "[/camera] 身份匹配 device_id=%s embedding=%s engine=%s "
+            "thr_emb=%.2f thr_geo=%.2f profiles=%d(emb=%d geo=%d)",
+            url_device,
+            camera_face_runtime.face_embedding_enabled,
+            "ok" if eng is not None else "fallback",
+            camera_face_runtime.identity_similarity_threshold,
+            camera_face_runtime.identity_geometry_threshold,
+            len(profs),
+            emb_n,
+            geo_n,
+        )
+        if camera_face_runtime.face_embedding_enabled and eng and geo_n and not emb_n:
+            logger.warning(
+                "[/camera] face_profiles.json 仍为 9 维几何档案，与 embedding 不兼容；"
+                "请删除旧档案并重新「保存人名」"
+            )
+    except Exception:
+        pass
 
     frame_count = 0
     detected_count = 0
@@ -196,7 +250,16 @@ async def handle_camera(
             frame_bytes = bytes(message)
             t0 = time.monotonic()
             try:
-                detect = await asyncio.to_thread(detector.detect_5pt, frame_bytes)
+                raw_faces = await asyncio.to_thread(detector.detect_faces, frame_bytes)
+                raw_faces = deduplicate_overlapping_faces(raw_faces)
+                await asyncio.to_thread(
+                    attach_descriptors_to_faces,
+                    raw_faces,
+                    bgr_image=detector.last_bgr,
+                )
+                tagged_faces = face_tracker.assign_ids(raw_faces)
+                update_device_faces(url_device, tagged_faces)
+                detect = analyze_face_detections(tagged_faces)
             except Exception as exc:
                 logger.warning(
                     "[/camera] 解码/推理失败 device_id=%s frame=%d: %s",
@@ -218,7 +281,7 @@ async def handle_camera(
 
             detected_count += 1
             _stat["frames_face"] += 1
-            analysis = analyze_face_detection(detect)
+            analysis = detect
             _pb_idle = getattr(asr_chat_hub, "pb_idle_snore", None)
             if _pb_idle is not None:
                 _pb_idle.on_camera_gaze_tick(url_device, analysis["is_frontal"])
@@ -234,9 +297,14 @@ async def handle_camera(
                 yaw_deg=analysis["yaw_deg"],
                 pitch_deg=analysis["pitch_deg"],
                 iris_offsets=analysis["iris_offsets"],
+                face_score=analysis.get("face_score"),
                 frontal_score=analysis["frontal_score"],
                 is_frontal=analysis["is_frontal"],
+                confidence=analysis.get("face_score"),
                 points=analysis["points"],
+                faces=analysis.get("faces"),
+                face_count=analysis.get("face_count"),
+                face_id=analysis.get("face_id"),
             )
             _stat["view_sent"] += _s
             _stat["view_attempted"] += _a
@@ -246,6 +314,8 @@ async def handle_camera(
             )
             if face_info is not None:
                 await asr_chat_hub.send(url_device, face_info)
+
+            await camera_servo_follower_tick(asr_chat_hub, url_device, analysis)
     except ConnectionClosed as closed:
         logger.info(
             "/camera WebSocket 已关闭: device_id=%s frames=%d detected=%d %s",

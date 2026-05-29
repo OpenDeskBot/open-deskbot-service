@@ -63,7 +63,10 @@ async def _publish_asr_chat_turn(
     turn = ChatTurnResult(
         llm_text=flow.get("llm_text"),
         llm_raw=flow.get("llm_raw"),
-        actions=list(flow.get("actions") or []),
+        moves=list(flow.get("moves") or []),
+        anims=list(flow.get("anims") or []),
+        tools=list(flow.get("tools") or []),
+        tool_results=list(flow.get("tool_results") or []),
         servo=list(flow.get("servo") or []),
         need_reply=bool(flow.get("need_reply", True)),
         json_ok=bool(flow.get("json_ok")),

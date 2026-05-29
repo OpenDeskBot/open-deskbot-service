@@ -10,7 +10,10 @@ class ChatTurnResult:
 
     llm_text: Optional[str] = None
     llm_raw: Optional[str] = None
-    actions: list[Any] = field(default_factory=list)
+    moves: list[Any] = field(default_factory=list)
+    anims: list[Any] = field(default_factory=list)
+    tools: list[Any] = field(default_factory=list)
+    tool_results: list[Any] = field(default_factory=list)
     servo: list[Any] = field(default_factory=list)
     need_reply: bool = True
     json_ok: bool = False
@@ -25,7 +28,10 @@ class ChatTurnResult:
         return {
             "llm_text": self.llm_text,
             "llm_raw": self.llm_raw,
-            "actions": self.actions,
+            "moves": self.moves,
+            "anims": self.anims,
+            "tools": self.tools,
+            "tool_results": self.tool_results,
             "servo": self.servo,
             "need_reply": self.need_reply,
             "json_ok": self.json_ok,

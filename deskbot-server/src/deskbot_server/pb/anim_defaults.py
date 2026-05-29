@@ -13,8 +13,13 @@ from deskbot_server.pb.face_bundle import (
 from deskbot_server.pb.phoneme_anim import phoneme_seq_to_anim_seq
 from deskbot_server.pb.shapes import (
     PB_ACTION_APPEND,
-    PB_ACTION_OPPORTUNISTIC,
+    PB_ACTION_DEFAULT,
     PB_ACTION_REPLACE,
+    PB_LEVEL_DEBUG,
+    PB_LEVEL_EMERGENCY,
+    PB_LEVEL_IDLE,
+    PB_LEVEL_TASK,
+    apply_pb_dispatch_fields,
     apply_offset_to_primitives,
     collapse_eye_part,
     collapse_mouth_by_phoneme,
@@ -23,6 +28,7 @@ from deskbot_server.pb.shapes import (
     default_mouth_by_phoneme,
     default_mouth_rect_for_phoneme,
     enumerate_zh_phonemes,
+    simplify_phoneme_key,
     expand_eye_part,
     expand_extra_part,
     expand_mouth_by_phoneme,
@@ -44,8 +50,13 @@ from deskbot_server.pb.servo_pcm import (
 
 __all__ = [
     "PB_ACTION_APPEND",
-    "PB_ACTION_OPPORTUNISTIC",
+    "PB_ACTION_DEFAULT",
     "PB_ACTION_REPLACE",
+    "PB_LEVEL_DEBUG",
+    "PB_LEVEL_EMERGENCY",
+    "PB_LEVEL_IDLE",
+    "PB_LEVEL_TASK",
+    "apply_pb_dispatch_fields",
     "align_pcm_s16le_mono_to_chunk_ms",
     "apply_llm_pb_servo_actions",
     "apply_offset_to_primitives",
@@ -78,4 +89,5 @@ __all__ = [
     "pb_json_messages",
     "phoneme_seq_to_anim_seq",
     "resolve_pb_face_bundle",
+    "simplify_phoneme_key",
 ]

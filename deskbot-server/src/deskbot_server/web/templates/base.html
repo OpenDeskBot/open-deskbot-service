@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230071e3'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='16' fill='white'%3EB%3C/text%3E%3C/svg%3E" />
   <title>{% block page_title %}Deskbot Server{% endblock %}</title>
   <style>
     :root {
@@ -99,13 +100,13 @@
     <div class="layout-brand">Deskbot Server</div>
     <button type="button" class="layout-toggle" id="layoutToggle" title="展开/收起侧栏">‹ 收起</button>
     <nav class="layout-nav">
-      <a href="{{ url_for('debug_online') }}" class="{% if active_nav == 'online' %}active{% endif %}">
-        <span class="full">在线调试</span>
-        <span class="short" title="在线调试">线</span>
-      </a>
       <a href="{{ url_for('debug_devices') }}" class="{% if active_nav == 'devices' %}active{% endif %}">
         <span class="full">设备调试</span>
         <span class="short" title="设备调试">设</span>
+      </a>
+      <a href="{{ url_for('debug_online') }}" class="{% if active_nav == 'online' %}active{% endif %}">
+        <span class="full">ASR调试</span>
+        <span class="short" title="ASR调试">A</span>
       </a>
       <a href="{{ url_for('debug_llm') }}" class="{% if active_nav == 'llm' %}active{% endif %}">
         <span class="full">LLM 调试</span>
@@ -114,10 +115,6 @@
       <a href="{{ url_for('debug_paddlespeech') }}" class="{% if active_nav == 'paddle' %}active{% endif %}">
         <span class="full">PaddleSpeech 调试</span>
         <span class="short" title="PaddleSpeech 调试">P</span>
-      </a>
-      <a href="{{ url_for('debug_simulation') }}" class="{% if active_nav == 'sim' %}active{% endif %}">
-        <span class="full">仿真调试</span>
-        <span class="short" title="仿真调试">仿</span>
       </a>
       <a href="{{ url_for('settings') }}" class="{% if active_nav == 'settings' %}active{% endif %}">
         <span class="full">系统配置</span>

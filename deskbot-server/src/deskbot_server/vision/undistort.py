@@ -31,6 +31,11 @@ from typing import Any, Optional
 import cv2  # type: ignore
 import numpy as np
 
+from deskbot_server.vision.geometry import (
+    DEFAULT_HORIZONTAL_FOV_DEG,
+    estimate_camera_matrix_from_fov,
+)
+
 logger = logging.getLogger("deskbot-server")
 
 
@@ -155,25 +160,69 @@ def try_build_undistorter(camera_face_cfg: dict[str, Any]) -> Optional[CameraUnd
     else:
         cm = ud.get("camera_matrix")
         dc = ud.get("dist_coeffs")
-        if not cm or not dc:
-            logger.warning(
-                "[camera_face] 已启用 undistort 但未配置 calibration_json/camera_matrix，跳过矫正"
-            )
-            return None
-        try:
-            K = np.array(cm, dtype=np.float64)
-            dist = np.array(dc, dtype=np.float64).reshape(-1, 1)
-        except (TypeError, ValueError) as e:
-            logger.error("[camera_face] camera_matrix/dist_coeffs 解析失败: %s", e)
-            return None
         if cw <= 0 or ch <= 0:
-            logger.error(
-                "[camera_face] undistort 须在 YAML 中提供 calib_width/calib_height（标定分辨率）"
+            cw = int(
+                ud.get("calib_width")
+                or ud.get("image_width")
+                or camera_face_cfg.get("frame_width")
+                or 320
             )
-            return None
-        if K.shape != (3, 3):
-            logger.error("[camera_face] camera_matrix 须为 3×3")
-            return None
+            ch = int(
+                ud.get("calib_height")
+                or ud.get("image_height")
+                or camera_face_cfg.get("frame_height")
+                or 240
+            )
+        if not cm or not dc:
+            use_fov = ud.get("use_fov_estimate", True)
+            hfov = float(
+                camera_face_cfg.get("horizontal_fov_deg") or DEFAULT_HORIZONTAL_FOV_DEG
+            )
+            if use_fov and cw > 0 and ch > 0:
+                K = np.array(
+                    estimate_camera_matrix_from_fov(cw, ch, hfov),
+                    dtype=np.float64,
+                )
+                default_dc = ud.get("default_dist_coeffs") or [
+                    -0.28,
+                    0.09,
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
+                try:
+                    dist = np.array(default_dc, dtype=np.float64).reshape(-1, 1)
+                except (TypeError, ValueError) as e:
+                    logger.error("[camera_face] default_dist_coeffs 无效: %s", e)
+                    return None
+                logger.info(
+                    "[camera_face] undistort 由水平 FOV=%.1f° 估计内参（%d×%d），"
+                    "使用默认畸变系数（建议标定替换）",
+                    hfov,
+                    cw,
+                    ch,
+                )
+            else:
+                logger.warning(
+                    "[camera_face] 已启用 undistort 但未配置 calibration_json/camera_matrix，"
+                    "且未启用 use_fov_estimate，跳过矫正"
+                )
+                return None
+        else:
+            try:
+                K = np.array(cm, dtype=np.float64)
+                dist = np.array(dc, dtype=np.float64).reshape(-1, 1)
+            except (TypeError, ValueError) as e:
+                logger.error("[camera_face] camera_matrix/dist_coeffs 解析失败: %s", e)
+                return None
+            if cw <= 0 or ch <= 0:
+                logger.error(
+                    "[camera_face] undistort 须在 YAML 中提供 calib_width/calib_height（标定分辨率）"
+                )
+                return None
+            if K.shape != (3, 3):
+                logger.error("[camera_face] camera_matrix 须为 3×3")
+                return None
 
     assert K is not None and dist is not None
 
@@ -205,37 +254,97 @@ class CameraFaceRuntime:
     undistorter: Optional[CameraUndistorter]
     min_face_detection_confidence: float
     min_face_presence_confidence: float
+    num_faces: int = 5
+    face_track_max_dist_px: float = 90.0
+    face_track_max_lost_frames: int = 18
+    frame_width: int = 320
+    frame_height: int = 240
+    face_embedding_enabled: bool = True
+    identity_similarity_threshold: float = 0.40
+    identity_geometry_threshold: float = 0.88
 
 
 def build_camera_face_runtime(config: dict[str, Any]) -> CameraFaceRuntime:
     raw = dict(config.get("camera_face") or {})
+    try:
+        from deskbot_server.camera_face_config_store import load_camera_face_cfg_file
+
+        file_cfg = load_camera_face_cfg_file()
+        if file_cfg:
+            raw = {**raw, **file_cfg}
+            from deskbot_server.camera_face_tune import apply_camera_face_tune
+
+            apply_camera_face_tune(file_cfg)
+    except Exception:
+        pass
 
     md_raw = os.environ.get("CAMERA_MIN_FACE_DETECTION_CONFIDENCE")
     mp_raw = os.environ.get("CAMERA_MIN_FACE_PRESENCE_CONFIDENCE")
+    nf_raw = os.environ.get("CAMERA_NUM_FACES")
 
     md = float(md_raw) if md_raw not in (None, "") else float(raw.get("min_face_detection_confidence", 0.5))
     mp = float(mp_raw) if mp_raw not in (None, "") else float(raw.get("min_face_presence_confidence", 0.5))
+    nf = int(nf_raw) if nf_raw not in (None, "") else int(raw.get("num_faces", 5))
 
     md = max(0.05, min(0.95, md))
     mp = max(0.05, min(0.95, mp))
+    nf = max(1, min(10, nf))
+
+    track_max_dist = float(raw.get("face_track_max_dist_px", 90.0))
+    track_max_lost = int(raw.get("face_track_max_lost_frames", 18))
+    track_max_dist = max(16.0, min(240.0, track_max_dist))
+    track_max_lost = max(1, min(60, track_max_lost))
+
+    fw = int(raw.get("frame_width", 320))
+    fh = int(raw.get("frame_height", 240))
+    fw = max(160, min(640, fw))
+    fh = max(120, min(480, fh))
+
+    fe_raw = raw.get("face_embedding_enabled", True)
+    face_embedding_enabled = str(fe_raw).strip().lower() not in ("0", "false", "no", "off")
+    ist_default = 0.40 if face_embedding_enabled else 0.82
+    ist = float(raw.get("identity_similarity_threshold", ist_default))
+    ist = max(0.25, min(0.99, ist))
+    ist_geo = float(raw.get("identity_similarity_threshold_geometry", 0.88))
+    ist_geo = max(0.75, min(0.99, ist_geo))
 
     ud = try_build_undistorter(raw)
 
     if ud is None:
         logger.info(
-            "[camera_face] MediaPipe 阈值 min_det=%.2f min_presence=%.2f（undistort 关闭）",
+            "[camera_face] frame=%dx%d num_faces=%d min_det=%.2f min_presence=%.2f "
+            "track_dist=%.0fpx track_lost=%d（undistort 关闭）",
+            fw,
+            fh,
+            nf,
             md,
             mp,
+            track_max_dist,
+            track_max_lost,
         )
     else:
         logger.info(
-            "[camera_face] MediaPipe 阈值 min_det=%.2f min_presence=%.2f（undistort 开启）",
+            "[camera_face] frame=%dx%d num_faces=%d min_det=%.2f min_presence=%.2f "
+            "track_dist=%.0fpx track_lost=%d（undistort 开启）",
+            fw,
+            fh,
+            nf,
             md,
             mp,
+            track_max_dist,
+            track_max_lost,
         )
 
     return CameraFaceRuntime(
         undistorter=ud,
         min_face_detection_confidence=md,
         min_face_presence_confidence=mp,
+        num_faces=nf,
+        face_track_max_dist_px=track_max_dist,
+        face_track_max_lost_frames=track_max_lost,
+        frame_width=fw,
+        frame_height=fh,
+        face_embedding_enabled=face_embedding_enabled,
+        identity_similarity_threshold=ist,
+        identity_geometry_threshold=ist_geo,
     )

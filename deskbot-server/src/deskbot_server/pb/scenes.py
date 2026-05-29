@@ -1,34 +1,38 @@
 from __future__ import annotations
 
 import copy
-import json
-import os
-from typing import Optional
+from typing import Any, Optional
 
-from deskbot_server.constants import PB_SCENES_FILE
+from deskbot_server.face_expr_scenes_store import (
+    design_frames_to_pb_chain,
+    find_design_scene_by_name,
+    load_face_expr_scenes_file,
+)
+from deskbot_server.pb.shapes import (
+    PB_ACTION_APPEND,
+    PB_LEVEL_DEBUG,
+    apply_pb_dispatch_fields,
+)
 
-_pb_scenes_doc_cache: Optional[tuple[float, dict]] = None
+
+def _load_design_scenes_rows() -> list[dict[str, Any]]:
+    return load_face_expr_scenes_file(seed_if_missing=True) or []
 
 
 def _load_pb_scenes_document() -> dict:
-    """读取 ``pb_scenes_*.json`` 根对象；按 mtime 缓存。"""
-    global _pb_scenes_doc_cache
-    try:
-        mtime = os.path.getmtime(PB_SCENES_FILE)
-    except OSError:
-        _pb_scenes_doc_cache = None
-        return {}
-    if _pb_scenes_doc_cache is not None and _pb_scenes_doc_cache[0] == mtime:
-        return _pb_scenes_doc_cache[1]
-    try:
-        with open(PB_SCENES_FILE, encoding="utf-8") as f:
-            doc = json.load(f)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}
-    if not isinstance(doc, dict):
-        return {}
-    _pb_scenes_doc_cache = (mtime, doc)
-    return doc
+    """兼容旧调用：返回 ``{ "scenes": { name: { frames, ... } } }`` 形结构。"""
+    rows = _load_design_scenes_rows()
+    scenes: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        scenes[name] = {
+            "id": name,
+            "title_zh": row.get("title") or name,
+            "frames": copy.deepcopy(row.get("frames") or []),
+        }
+    return {"scenes": scenes}
 
 
 def _pb_scenes_root(doc: dict) -> dict:
@@ -36,50 +40,32 @@ def _pb_scenes_root(doc: dict) -> dict:
     return sc if isinstance(sc, dict) else {}
 
 
-def _pb_scene_entry_by_name(doc: dict, scene_lower: str) -> Optional[dict]:
-    """按 **不区分大小写** 匹配 ``scenes`` 下的场景名。"""
-    want = (scene_lower or "").strip().lower()
-    if not want:
-        return None
-    for k, v in _pb_scenes_root(doc).items():
-        if not isinstance(k, str) or k.startswith("_"):
-            continue
-        if k.strip().lower() == want and isinstance(v, dict):
-            return v
-    return None
+def _pb_scene_entry_by_name(doc: dict, scene_lower: str) -> Optional[dict[str, Any]]:
+    """按 **不区分大小写** 匹配 ``face_expr_scenes.json`` 中的场景。"""
+    _ = doc
+    return find_design_scene_by_name(_load_design_scenes_rows(), scene_lower)
 
 
-def _pb_scene_keys_sorted(doc: dict) -> list[str]:
-    """返回含非空 ``frames`` 的场景 id 列表（原始大小写，排序）。"""
+def _pb_scene_keys_sorted(doc: dict | None = None) -> list[str]:
+    """返回含非空 ``frames`` 的场景 name 列表（排序）。"""
+    _ = doc
     out: list[str] = []
-    for k, v in _pb_scenes_root(doc).items():
-        if not isinstance(k, str) or k.startswith("_"):
-            continue
-        if isinstance(v, dict) and isinstance(v.get("frames"), list) and len(v["frames"]) > 0:
-            out.append(k.strip())
+    for row in _load_design_scenes_rows():
+        name = str(row.get("name") or "").strip()
+        frames = row.get("frames")
+        if name and isinstance(frames, list) and frames:
+            out.append(name)
     out.sort(key=lambda s: (s.lower(), s))
     return out
 
 
 def _prepare_pb_scene_chain_frames(scene_name: str, *, runtime_req: str) -> list[dict]:
-    """从场景文档复制一链 pb 帧，写入 ``req``，并设 ``append`` / ``opportunistic``。"""
-    doc = _load_pb_scenes_document()
-    ent = _pb_scene_entry_by_name(doc, scene_name)
+    """从 ``face_expr_scenes.json`` 生成 pb 链，``append`` + 调试 ``level=3``。"""
+    ent = find_design_scene_by_name(_load_design_scenes_rows(), scene_name)
     if ent is None:
         return []
-    raw_frames = ent.get("frames")
-    if not isinstance(raw_frames, list) or not raw_frames:
+    chain = design_frames_to_pb_chain(ent.get("frames") or [], runtime_req=runtime_req)
+    if not chain:
         return []
-    frames: list[dict] = []
-    for fr in raw_frames:
-        if not isinstance(fr, dict):
-            continue
-        one = copy.deepcopy(fr)
-        one["req"] = runtime_req
-        frames.append(one)
-    if not frames:
-        return []
-    chain_action = "append" if len(frames) > 1 else "opportunistic"
-    for one in frames:
-        one["action"] = chain_action
-    return frames
+    apply_pb_dispatch_fields(chain, action=PB_ACTION_APPEND, level=PB_LEVEL_DEBUG)
+    return chain

@@ -86,6 +86,14 @@ LLM_API_KEY=xxx FAST_START=1 ./start.sh # 跳过 pip 重装
 
 `pitch_deg` 在嘴角关键点缺失时可能省略；未检测到人脸时不发送。
 
+### 人脸身份（InsightFace embedding）
+
+- 识别向量：**512 维** ArcFace（`buffalo_s` / `w600k_mbf`），替代原 9 维几何特征。
+- 配置：`data/camera_face.json` 中 `face_embedding_enabled: true`，`identity_similarity_threshold` 建议 **0.35–0.45**（同一人常见 ≥0.40）。
+- 首次连接 `/camera` 会自动下载模型到 `~/.insightface/models/buffalo_s`（约 120MB，需网络）。
+- **旧档案（9 维）与 embedding 不兼容**，请在调试页对每人重新「保存人名」。
+- 依赖：`insightface`、`onnxruntime`（已写入 `requirements.txt`）。
+
 ### `/camera`
 
 - URL：`ws://host:9000/camera?device_id=<id>`（**必填**）

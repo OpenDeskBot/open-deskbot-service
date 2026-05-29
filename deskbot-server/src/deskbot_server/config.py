@@ -37,3 +37,10 @@ def _resolve_llm_system_prompt(cfg: dict[str, Any], config_dir: Path) -> None:
         return
     if llm.get("system_prompt_file"):
         llm["system_prompt"] = resolve_llm_system_prompt(llm, config_dir)
+
+
+def save_config(cfg: dict[str, Any], path: str | Path | None = None) -> None:
+    """写回 ``config.yaml``（会丢失 YAML 注释，与调试页其它保存行为一致）。"""
+    config_path = Path(path or DEFAULT_CONFIG_PATH).resolve()
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)

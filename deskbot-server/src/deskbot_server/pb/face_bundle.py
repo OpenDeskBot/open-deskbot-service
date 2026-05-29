@@ -32,6 +32,110 @@ _logger = logging.getLogger(__name__)
 
 _hot_file_cache: dict[str, tuple[float, Any]] = {}
 _ensured_json_bundle_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_expr_default_bundle_cache: tuple[float, float, dict[str, Any]] | None = None
+
+
+def _frame_elements(frames: list[Any], idx: int) -> dict[str, Any]:
+    if idx < 0 or idx >= len(frames):
+        return {}
+    row = frames[idx]
+    if not isinstance(row, dict):
+        return {}
+    elements = row.get("elements")
+    return elements if isinstance(elements, dict) else {}
+
+
+def expr_default_pb_face_bundle() -> dict[str, Any]:
+    """从 ``face_expr_scenes.json`` 的 ``default`` 场景取眼/鼻图元，口型来自 ``face_mouth_by_phoneme.json``。"""
+    from deskbot_server.face_expr_scenes_store import (
+        _DEFAULT_SPEECH_BLINK_CLOSE_MS,
+        _DEFAULT_SPEECH_BLINK_OPEN_MS,
+        default_speech_blink_scene,
+        find_design_scene_by_name,
+        load_face_expr_scenes_file,
+    )
+    from deskbot_server.face_mouth_config_store import groups_to_mouth_bundle, load_face_mouth_cfg_file
+
+    rows = load_face_expr_scenes_file(seed_if_missing=True) or []
+    ent = find_design_scene_by_name(rows, "default") or default_speech_blink_scene()
+    frames = ent.get("frames") if isinstance(ent, dict) else []
+    if not isinstance(frames, list):
+        frames = []
+
+    open_e = _frame_elements(frames, 0)
+    half_e = _frame_elements(frames, 1) if len(frames) > 1 else open_e
+    close_e = _frame_elements(frames, 2) if len(frames) > 2 else open_e
+
+    def _copy_list(key: str, src: dict[str, Any]) -> list[Any]:
+        val = src.get(key)
+        return copy.deepcopy(val) if isinstance(val, list) else []
+
+    eye_l_open = _copy_list("eye_l", open_e)
+    eye_r_open = _copy_list("eye_r", open_e)
+    eye_l_default = _copy_list("eye_l", half_e) or copy.deepcopy(eye_l_open)
+    eye_r_default = _copy_list("eye_r", half_e) or copy.deepcopy(eye_r_open)
+    eye_l_close = _copy_list("eye_l", close_e) or copy.deepcopy(eye_l_open)
+    eye_r_close = _copy_list("eye_r", close_e) or copy.deepcopy(eye_r_open)
+    nose_default = _copy_list("nose", open_e)
+    extra_default = _copy_list("extra", open_e)
+
+    open_ms = _DEFAULT_SPEECH_BLINK_OPEN_MS
+    if frames and isinstance(frames[0], dict):
+        try:
+            open_ms = int(frames[0].get("ms") or _DEFAULT_SPEECH_BLINK_OPEN_MS)
+        except (TypeError, ValueError):
+            open_ms = _DEFAULT_SPEECH_BLINK_OPEN_MS
+
+    bundle: dict[str, Any] = {
+        "mouth_by_phoneme": {},
+        "eye_l": {
+            "default": eye_l_default,
+            "open": eye_l_open,
+            "close": eye_l_close,
+        },
+        "eye_r": {
+            "default": eye_r_default,
+            "open": eye_r_open,
+            "close": eye_r_close,
+        },
+        "nose": {"default": nose_default},
+        "extra": {"default": extra_default},
+        "metadata": {
+            "blink": {
+                "open_ms": open_ms,
+                "close_ms": _DEFAULT_SPEECH_BLINK_CLOSE_MS,
+            },
+        },
+    }
+
+    groups = load_face_mouth_cfg_file(seed_if_missing=True) or []
+    bundle.update(groups_to_mouth_bundle(groups))
+    return ensure_pb_face_bundle_shape(bundle)
+
+
+def load_expr_default_pb_face_bundle() -> dict[str, Any]:
+    """``default`` 表情脸包；随 ``face_expr_scenes.json`` / ``face_mouth_by_phoneme.json`` mtime 热重载。"""
+    global _expr_default_bundle_cache
+    from deskbot_server.constants import FACE_EXPR_SCENES_FILE, FACE_MOUTH_BY_PHONEME_FILE
+
+    mtimes: list[float] = []
+    for path in (FACE_EXPR_SCENES_FILE, FACE_MOUTH_BY_PHONEME_FILE):
+        try:
+            mtimes.append(float(os.stat(path).st_mtime))
+        except OSError:
+            mtimes.append(0.0)
+    key = (mtimes[0], mtimes[1])
+    if _expr_default_bundle_cache is not None and _expr_default_bundle_cache[:2] == key:
+        return _expr_default_bundle_cache[2]
+    out = expr_default_pb_face_bundle()
+    _expr_default_bundle_cache = (key[0], key[1], out)
+    _logger.info(
+        "[pb_face_bundle] 已从 default 表情场景加载 (scenes_mtime=%s mouth_mtime=%s)",
+        key[0],
+        key[1],
+    )
+    return out
+
 def default_pb_face_bundle() -> dict[str, Any]:
     """默认整包：口型按音素 + 默认零偏移；眼为 ``default``/``open``/``close`` 三键；鼻仅 ``default``。
 
@@ -383,11 +487,10 @@ def load_pb_face_bundle_json_document(path_raw: str) -> dict[str, Any]:
 def resolve_pb_face_bundle(tts_cfg: dict[str, Any] | None) -> dict[str, Any]:
     """根据 ``tts`` 配置与环境变量选择卡通脸数据包。
 
-    - ``pb_face_bundle_json`` / ``DESKBOT_PB_FACE_BUNDLE_JSON``：**主配置** JSON/YAML（完整动画数据，
-      见 ``data/pb_face_bundle_demo.json``）。每次下发 pb 前按 **文件 mtime** 检测，变更则自动重载（热切换）。
-    - ``pb_face_bundle`` / ``DESKBOT_PB_FACE_BUNDLE``：未配置 json 路径时生效：``default`` / ``demo``。
-    - ``pb_face_bundle_file`` / ``DESKBOT_PB_FACE_BUNDLE_FILE``：在 **当前 base**（json 或 profile）上再合并一层；
-      同样按 mtime 热加载。
+    - 默认：``face_expr_scenes.json`` 的 ``default`` 场景 + ``face_mouth_by_phoneme.json``（按 mtime 热重载）。
+    - ``pb_face_bundle_json`` / ``DESKBOT_PB_FACE_BUNDLE_JSON``：可选外部 JSON/YAML 主配置（高级用法）。
+    - ``pb_face_bundle`` / ``DESKBOT_PB_FACE_BUNDLE``：``demo`` 为内置试玩档；否则走 default 表情。
+    - ``pb_face_bundle_file`` / ``DESKBOT_PB_FACE_BUNDLE_FILE``：在 base 上再合并一层 overlay。
     """
     cfg = tts_cfg or {}
     json_path = str(
@@ -406,7 +509,7 @@ def resolve_pb_face_bundle(tts_cfg: dict[str, Any] | None) -> dict[str, Any]:
         try:
             base = load_pb_face_bundle_json_document(json_path)
         except OSError as e:
-            _logger.warning("读取 pb_face_bundle_json=%r 失败: %s，回退 profile", json_path, e)
+            _logger.warning("读取 pb_face_bundle_json=%r 失败: %s，回退 default 表情", json_path, e)
             base = None
         if base is not None:
             if fpath:
@@ -422,13 +525,12 @@ def resolve_pb_face_bundle(tts_cfg: dict[str, Any] | None) -> dict[str, Any]:
         or os.environ.get("DESKBOT_PB_FACE_BUNDLE", "")
         or "default"
     ).strip().lower()
-    if prof in ("", "default", "0", "false", "off"):
-        base = default_pb_face_bundle()
-    elif prof == "demo":
+    if prof == "demo":
         base = demo_pb_face_bundle()
     else:
-        _logger.warning("未知 pb_face_bundle=%r，使用 default", prof)
-        base = default_pb_face_bundle()
+        if prof not in ("", "default", "0", "false", "off"):
+            _logger.warning("未知 pb_face_bundle=%r，使用 default 表情", prof)
+        base = load_expr_default_pb_face_bundle()
 
     if not fpath:
         return base

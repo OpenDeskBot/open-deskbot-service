@@ -21,6 +21,12 @@ FRONTAL_THRESHOLD = 0.4
 # 9 点 yaw_deg 路径的正脸判定阈值（°）：|yaw_deg| < 该值视为正脸——
 # 这是下发给 ESP32 机器人的 face_info.is_frontal 的派生口径。
 FRONTAL_YAW_THRESHOLD_DEG = 15.0
+# 虹膜 0→1 横向扫过的近似总角度（单眼），用于 offset = (ratio−0.5)·range/2。
+EYE_YAW_RANGE_DEG = 50.0
+# 默认水平视场角（°），用于画面角估算与无标定 undistort 内参估计。
+DEFAULT_HORIZONTAL_FOV_DEG = 120.0
+# 正脸角度默认阈值（°）：max(|yaw|, |pitch|) ≤ 该值视为正脸朝镜头。
+FRONTAL_ANGLE_THRESHOLD_DEG = 15.0
 
 # MediaPipe Face Mesh 468 点中用于构造 5 点关键点的索引；
 # 命名沿用「图像视角」（image-left / image-right），与 /face_pos 历史协议一致。
@@ -388,3 +394,205 @@ def compute_eye_iris_offsets(landmarks: list) -> dict:
         ratio = max(0.0, min(1.0, ratio))
         out[eye_key] = round(ratio, 3)
     return out
+
+
+def compute_face_score(
+    points: list,
+    landmarks: list,
+    *,
+    image_w: int = FACE_FRAME_WIDTH,
+    image_h: int = FACE_FRAME_HEIGHT,
+) -> float:
+    """人脸检测质量分 [0, 1]：细化 landmark 完整度 + 脸在画面中的尺寸。
+
+    MediaPipe FaceLandmarker 不对外暴露逐脸 detection confidence；此处用
+    可观测质量作代理：关键点越全、眼距越大（脸越近/越大），分数越高。
+    """
+    by_detail = {
+        p["name"]: p
+        for p in (landmarks or [])
+        if isinstance(p, dict) and p.get("name") and "x" in p and "y" in p
+    }
+    n_detail = len(MP_FACE_DETAIL_NAMES)
+    completeness = (
+        sum(1 for name in MP_FACE_DETAIL_NAMES if name in by_detail) / n_detail
+        if n_detail
+        else 0.0
+    )
+
+    by5 = {
+        p["name"]: p
+        for p in (points or [])
+        if isinstance(p, dict) and p.get("name") and "x" in p and "y" in p
+    }
+    le = by5.get("left_eye")
+    re_ = by5.get("right_eye")
+    size_score = 0.0
+    if le and re_:
+        try:
+            lex, ley = float(le["x"]), float(le["y"])
+            rex, rey = float(re_["x"]), float(re_["y"])
+            eye_dist = math.hypot(rex - lex, rey - ley)
+            ref = max(float(image_w), 1.0) * 0.12
+            size_score = min(1.0, eye_dist / ref)
+        except (TypeError, ValueError):
+            size_score = 0.0
+
+    score = 0.55 * completeness + 0.45 * size_score
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def compute_frontal_angle_deg(
+    yaw_deg: Optional[float],
+    pitch_deg: Optional[float],
+) -> Optional[float]:
+    """正脸角度（°）：头部相对镜头轴线的偏差，取 ``max(|yaw|, |pitch|)``。
+
+    正对镜头 → 0°；转头/抬头幅度越大值越大。与 ``frontal_score``（几何分）不同，
+    这是纯姿态角口径，用于「跟随正脸」与表格展示。
+    """
+    if yaw_deg is None and pitch_deg is None:
+        return None
+    y = abs(float(yaw_deg or 0.0))
+    p = abs(float(pitch_deg or 0.0))
+    return round(max(y, p), 1)
+
+
+def compute_is_frontal_by_angle(
+    yaw_deg: Optional[float],
+    pitch_deg: Optional[float],
+    *,
+    threshold_deg: float = FRONTAL_ANGLE_THRESHOLD_DEG,
+) -> Optional[bool]:
+    """按正脸角度阈值判定是否正对镜头。"""
+    angle = compute_frontal_angle_deg(yaw_deg, pitch_deg)
+    if angle is None:
+        return None
+    return angle <= float(threshold_deg)
+
+
+def decompose_facial_transform_matrix(matrix: list | tuple) -> Optional[dict[str, float]]:
+    """从 MediaPipe ``facial_transformation_matrixes``（4×4 行主序）分解头部位姿角。
+
+    矩阵将 canonical face model 映射到检测脸在相机坐标系中的位姿；取旋转子矩阵
+    做 XYZ 欧拉分解。符号与 :func:`compute_face_yaw_deg` / pitch 尽量对齐：
+    yaw 右负左正，pitch 抬头正低头负。
+    """
+    try:
+        m = [float(x) for x in matrix]
+    except (TypeError, ValueError):
+        return None
+    if len(m) != 16:
+        return None
+
+    r00, r01, r02 = m[0], m[1], m[2]
+    r10, r11, r12 = m[4], m[5], m[6]
+    r20, r21, r22 = m[8], m[9], m[10]
+
+    sy = math.hypot(r00, r10)
+    if sy >= 1e-6:
+        pitch = math.atan2(r21, r22)
+        yaw = math.atan2(-r20, sy)
+        roll = math.atan2(r10, r00)
+    else:
+        pitch = math.atan2(-r12, r11)
+        yaw = math.atan2(-r20, sy)
+        roll = 0.0
+
+    # MediaPipe 矩阵系与 2D 启发式符号可能差一个负号；实测对齐后取反 yaw/pitch。
+    MP_YAW_SIGN = -1
+    MP_PITCH_SIGN = -1
+    MP_ROLL_SIGN = 1
+    return {
+        "yaw_deg": round(math.degrees(yaw) * MP_YAW_SIGN, 1),
+        "pitch_deg": round(math.degrees(pitch) * MP_PITCH_SIGN, 1),
+        "roll_deg": round(math.degrees(roll) * MP_ROLL_SIGN, 1),
+    }
+
+
+def compute_eye_yaw_offset_deg(
+    iris_offsets: dict,
+    *,
+    eye_yaw_range_deg: float = EYE_YAW_RANGE_DEG,
+) -> Optional[float]:
+    """瞳孔相对人脸的左右偏角（°）：虹膜在眼角连线 0.5 为 0，向图像 x 大侧为正。"""
+    vals: list[float] = []
+    for key in ("left_eye", "right_eye"):
+        v = (iris_offsets or {}).get(key)
+        if v is None:
+            continue
+        try:
+            vals.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    if not vals:
+        return None
+    avg = sum(vals) / len(vals)
+    half_range = max(1.0, float(eye_yaw_range_deg)) * 0.5
+    norm = max(-1.0, min(1.0, (avg - 0.5) * 2.0))
+    return round(norm * half_range, 1)
+
+
+def compute_gaze_angles(
+    face_yaw_deg: Optional[float],
+    face_pitch_deg: Optional[float],
+    iris_offsets: dict,
+    *,
+    eye_yaw_range_deg: float = EYE_YAW_RANGE_DEG,
+) -> dict[str, Optional[float]]:
+    """合成注视角：头相对镜头 yaw/pitch + 眼相对头的偏角 → 视线相对镜头。
+
+    当前模型仅有虹膜横向 offset，pitch 方向暂只用 head pitch。
+    """
+    eye_yaw = compute_eye_yaw_offset_deg(
+        iris_offsets, eye_yaw_range_deg=eye_yaw_range_deg
+    )
+    gaze_yaw: Optional[float] = None
+    if face_yaw_deg is not None:
+        gaze_yaw = round(float(face_yaw_deg) + (eye_yaw or 0.0), 1)
+    elif eye_yaw is not None:
+        gaze_yaw = eye_yaw
+    gaze_pitch = face_pitch_deg
+    return {
+        "eye_yaw_offset_deg": eye_yaw,
+        "gaze_yaw_deg": gaze_yaw,
+        "gaze_pitch_deg": gaze_pitch,
+    }
+
+
+def compute_is_looking_at_camera(
+    gaze_yaw_deg: Optional[float],
+    gaze_pitch_deg: Optional[float],
+    *,
+    yaw_threshold_deg: float = FRONTAL_YAW_THRESHOLD_DEG,
+    pitch_threshold_deg: float = FRONTAL_YAW_THRESHOLD_DEG,
+) -> Optional[bool]:
+    """视线是否朝向镜头：合成 yaw/pitch 均在阈值内为 True。"""
+    if gaze_yaw_deg is None and gaze_pitch_deg is None:
+        return None
+    if gaze_yaw_deg is not None and abs(gaze_yaw_deg) >= yaw_threshold_deg:
+        return False
+    if gaze_pitch_deg is not None and abs(gaze_pitch_deg) >= pitch_threshold_deg:
+        return False
+    return True
+
+
+def estimate_camera_matrix_from_fov(
+    width: int,
+    height: int,
+    horizontal_fov_deg: float,
+) -> list[list[float]]:
+    """由水平 FOV 与分辨率估计 pinhole 内参 3×3（fx=fy，主点在中心）。"""
+    w = max(int(width), 1)
+    h = max(int(height), 1)
+    hfov = max(10.0, min(170.0, float(horizontal_fov_deg)))
+    hfov_rad = math.radians(hfov)
+    fx = (w / 2.0) / math.tan(hfov_rad / 2.0)
+    fy = fx
+    cx = w / 2.0
+    cy = h / 2.0
+    return [
+        [fx, 0.0, cx],
+        [0.0, fy, cy],
+        [0.0, 0.0, 1.0],
+    ]

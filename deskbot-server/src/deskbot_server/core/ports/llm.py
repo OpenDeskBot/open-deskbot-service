@@ -4,4 +4,10 @@ from typing import Optional, Protocol
 
 
 class LlmPort(Protocol):
-    async def complete(self, user_text: str, *, device_context: Optional[str] = None) -> str: ...
+    async def complete(
+        self,
+        user_text: str,
+        *,
+        device_context: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> str: ...

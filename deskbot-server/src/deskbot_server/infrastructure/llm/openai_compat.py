@@ -14,7 +14,10 @@ except ImportError:
 from openai import OpenAI
 
 from deskbot_server.core.settings import AppSettings
-from deskbot_server.llm.utils import llm_pb_scenes_prompt_appendix
+from deskbot_server.llm.utils import (
+    llm_pb_scenes_prompt_appendix,
+    llm_recognized_faces_prompt_appendix,
+)
 
 logger = logging.getLogger("deskbot-server")
 
@@ -52,11 +55,19 @@ class OpenAiLlmAdapter:
         weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         return now.strftime("%Y-%m-%d %H:%M:%S") + " " + weekdays[now.weekday()]
 
-    def _build_system_prompt(self, device_context: Optional[str] = None) -> str:
+    def _build_system_prompt(
+        self,
+        device_context: Optional[str] = None,
+        *,
+        device_id: Optional[str] = None,
+    ) -> str:
         base = f"{self._system_prompt}\n当前时间是: {self._beijing_time_str()}（北京时间，东八区）"
         px = llm_pb_scenes_prompt_appendix()
         if px:
             base += "\n" + px
+        fx = llm_recognized_faces_prompt_appendix(device_id)
+        if fx:
+            base += "\n\n" + fx
         if device_context:
             base += (
                 "\n\n以下为本机 ESP32 最近一次上报的播放/舵机状态（pb_ack，JSON）；"
@@ -65,8 +76,14 @@ class OpenAiLlmAdapter:
             )
         return base
 
-    async def complete(self, user_text: str, *, device_context: Optional[str] = None) -> str:
-        system_content = self._build_system_prompt(device_context)
+    async def complete(
+        self,
+        user_text: str,
+        *,
+        device_context: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> str:
+        system_content = self._build_system_prompt(device_context, device_id=device_id)
 
         def _chat() -> str:
             completion = self._client.chat.completions.create(

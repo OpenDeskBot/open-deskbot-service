@@ -197,33 +197,51 @@ platform_install_cpu_torch() {
     return 0
   fi
 
-  local cp_tag torch_wheel_name torch_wheel_url
+  local cp_tag torch_wheel_name torch_wheel_path torch_wheel_url
   cp_tag="$("$py" -c "import sys; v=sys.version_info; print('cp{0}{1}-cp{0}{1}'.format(v.major, v.minor))")"
   torch_wheel_name="torch-2.2.2+cpu-${cp_tag}-linux_x86_64.whl"
-  torch_wheel_url="https://download.pytorch.org/whl/cpu/${torch_wheel_name}"
+  # S3/CloudFront 对 URL 中字面量 '+' 返回 403，须编码为 %2B（aria2/wget 直链）
+  torch_wheel_url="https://download.pytorch.org/whl/cpu/${torch_wheel_name//+/%2B}"
+  torch_wheel_path="$torch_wheel_dir/$torch_wheel_name"
   mkdir -p "$torch_wheel_dir"
 
-  if [[ -f "$torch_wheel_dir/$torch_wheel_name" ]]; then
-    echo "检测到本地 torch wheel: $torch_wheel_dir/$torch_wheel_name"
-    "$py" -m pip install "$torch_wheel_dir/$torch_wheel_name" "${pip_extra[@]}"
-  elif command -v aria2c >/dev/null 2>&1; then
-    echo "使用 aria2 下载 torch wheel..."
-    aria2c -x 16 -s 16 -k 1M -d "$torch_wheel_dir" -o "$torch_wheel_name" "$torch_wheel_url"
-    "$py" -m pip install "$torch_wheel_dir/$torch_wheel_name" "${pip_extra[@]}"
-  else
-    "$py" -m pip install torch==2.2.2+cpu torchaudio==2.2.2+cpu \
-      --index-url https://download.pytorch.org/whl/cpu \
-      "${pip_extra[@]}" || {
-      echo "torch 安装失败：请确认 Python >= ${req_mm} 且为 linux x86_64。" >&2
-      return 1
-    }
-    return 0
-  fi
-
-  "$py" -m pip install torchaudio==2.2.2+cpu \
-    --index-url https://download.pytorch.org/whl/cpu \
-    "${pip_extra[@]}" || {
-    echo "torchaudio 安装失败。" >&2
+  _install_torch_pip_cpu() {
+    local index
+    for index in \
+      "https://download.pytorch.org/whl/cpu" \
+      "https://mirrors.aliyun.com/pytorch-wheels/cpu" \
+      "https://mirrors.tencent.com/pytorch-wheels/cpu"; do
+      echo "pip 安装 torch/torchaudio（index=${index}）..."
+      if "$py" -m pip install torch==2.2.2+cpu torchaudio==2.2.2+cpu \
+        --index-url "$index" \
+        "${pip_extra[@]}"; then
+        return 0
+      fi
+      echo "  该源失败，尝试下一镜像..."
+    done
     return 1
   }
+
+  if [[ -f "$torch_wheel_path" ]]; then
+    echo "检测到本地 torch wheel: $torch_wheel_path"
+    "$py" -m pip install "$torch_wheel_path" "${pip_extra[@]}" || return 1
+  elif [[ "${TORCH_USE_ARIA2:-0}" == "1" ]] && command -v aria2c >/dev/null 2>&1; then
+    echo "使用 aria2 下载 torch wheel（URL 已编码 + → %2B）..."
+    if aria2c -x 16 -s 16 -k 1M -d "$torch_wheel_dir" -o "$torch_wheel_name" "$torch_wheel_url" \
+      && [[ -f "$torch_wheel_path" ]]; then
+      "$py" -m pip install "$torch_wheel_path" "${pip_extra[@]}" || return 1
+    else
+      echo "aria2 下载失败，改用 pip..." >&2
+      rm -f "$torch_wheel_path"
+      _install_torch_pip_cpu || {
+        echo "torch 安装失败：请确认 Python >= ${req_mm} 且为 linux x86_64。" >&2
+        return 1
+      }
+    fi
+  else
+    _install_torch_pip_cpu || {
+      echo "torch 安装失败：可设 TORCH_USE_ARIA2=1 重试直链下载，或手动安装 torch==2.2.2+cpu。" >&2
+      return 1
+    }
+  fi
 }

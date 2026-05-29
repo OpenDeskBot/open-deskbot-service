@@ -1,0 +1,114 @@
+[
+  {
+    "name": "demo_greet",
+    "title": "演示问候",
+    "text": "你好，很高兴见到你",
+    "text_track": [],
+    "expr_track": [
+      {
+        "id": "e1",
+        "scene": "happy_smile",
+        "ms": 800
+      },
+      {
+        "id": "e2",
+        "scene": "default",
+        "ms": 1500
+      }
+    ],
+    "servo_track": [
+      {
+        "id": "s1",
+        "ms": 500,
+        "preset": "look_left"
+      },
+      {
+        "id": "s2",
+        "ms": 500,
+        "preset": "center"
+      }
+    ]
+  },
+  {
+    "name": "agree",
+    "title": "同意",
+    "text": "",
+    "text_track": [
+      {
+        "id": "cmpqtdlj4170j",
+        "text": "嗯嗯, 你的意见太好了, 一下子解开了我的疑惑",
+        "ms": 1500
+      }
+    ],
+    "expr_track": [
+      {
+        "id": "cmpqsbkg7qlj4",
+        "scene": "big_laugh",
+        "ms": 1800
+      },
+      {
+        "id": "cmpqsd73e3eth",
+        "scene": "fake_smile",
+        "ms": 1800
+      },
+      {
+        "id": "cmpqsdfcwlgtb",
+        "scene": "cat_cute",
+        "ms": 1800
+      }
+    ],
+    "servo_track": [
+      {
+        "id": "cmpqsbkg7fjsg",
+        "ms": 500,
+        "preset": "nod_head"
+      },
+      {
+        "id": "cmpqsdml66x4t",
+        "ms": 500,
+        "preset": "nod_head"
+      },
+      {
+        "id": "cmpqse6ejyug8",
+        "ms": 500,
+        "preset": "nod_head"
+      }
+    ]
+  },
+  {
+    "name": "angry",
+    "title": "生气",
+    "text": "",
+    "text_track": [
+      {
+        "id": "cmpqsgkkegg2z",
+        "text": "气死我了",
+        "ms": 1500
+      }
+    ],
+    "expr_track": [
+      {
+        "id": "cmpqsgbnnbn3a",
+        "scene": "angry",
+        "ms": 800
+      },
+      {
+        "id": "cmpqsgvpoy4lf",
+        "scene": "angry",
+        "ms": 800
+      }
+    ],
+    "servo_track": [
+      {
+        "id": "cmpqsgbno0wio",
+        "ms": 500,
+        "preset": "center"
+      },
+      {
+        "id": "cmpqsh33p4xoq",
+        "ms": 500,
+        "preset": "nod_head"
+      }
+    ]
+  }
+]

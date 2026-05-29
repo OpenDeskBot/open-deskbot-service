@@ -7,13 +7,14 @@ import os
 import websockets
 
 from deskbot_server.config import load_config
+from deskbot_server.debug_prefs_store import apply_debug_prefs_from_config
 from deskbot_server.constants import CAMERA_PATH, CAMERA_VIEW_PATH, DEVICE_PIPELINE_PATH
 from deskbot_server.core.settings import AppSettings
 from deskbot_server.env import load_dotenv
 from deskbot_server.pipeline.audio import AudioConfig
 from deskbot_server.vision.undistort import build_camera_face_runtime
 from deskbot_server.application.camera_broker import CameraImageBroker
-from deskbot_server.ws.asr_chat_hub import AsrChatHub  # PbIdleSnoreAfterDownlink（自动休眠暂关）
+from deskbot_server.ws.asr_chat_hub import AsrChatHub, PbIdleSilenceServoAfterDownlink
 from deskbot_server.ws.device_pipeline import DevicePipelineBroker
 from deskbot_server.ws.http_api import _build_http_request_handler
 from deskbot_server.ws.registry import DeviceRegistry
@@ -27,6 +28,7 @@ logger = logging.getLogger("deskbot-server")
 async def main():
     load_dotenv()
     config = load_config(os.environ.get("DESKBOT_SERVER_CONFIG", "config.yaml"))
+    apply_debug_prefs_from_config(config)
     app_settings = AppSettings.from_config(config)
     audio_cfg = AudioConfig(
         input_codec=app_settings.audio.input_codec,
@@ -61,7 +63,7 @@ async def main():
     device_pipeline_broker = DevicePipelineBroker()
     registry = DeviceRegistry()
     asr_chat_hub = AsrChatHub(device_pb_only=pipeline.asr_chat_device_pb_only)
-    # 自动休眠（空闲后下发 sleep_snore 等）暂关闭；恢复时取消下方注释块。
+    # 自动休眠（sleep_snore 场景）暂关闭；恢复时取消下方注释块。
     # idle_snore_sec = app_settings.server.pb_idle_snore_sec
     # sn_scene = app_settings.server.pb_idle_snore_scene
     # if idle_snore_sec > 0:
@@ -77,6 +79,16 @@ async def main():
     #         idle_snore_sec,
     #         sn_scene,
     #     )
+    idle_silence_sec = app_settings.server.pb_idle_silence_sec
+    if idle_silence_sec > 0:
+        asr_chat_hub.pb_idle_silence = PbIdleSilenceServoAfterDownlink(
+            asr_chat_hub,
+            idle_sec=idle_silence_sec,
+        )
+        logger.info(
+            "[server] pb_idle_silence: 距上次 pb 下行 %.1fs 无新数据则下发低头沉默 x=90 y=135 xm=0 ym=0",
+            idle_silence_sec,
+        )
     set_pb_idle_hub(asr_chat_hub)
     camera_image_broker = CameraImageBroker(send_fn=_safe_send)
     camera_face_runtime = build_camera_face_runtime(config)

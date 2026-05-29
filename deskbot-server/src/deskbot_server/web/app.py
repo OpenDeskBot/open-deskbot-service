@@ -18,10 +18,49 @@ except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore[assignment]
 
 
-from deskbot_server.config import load_config as _load_config_yaml
+from deskbot_server.config import load_config as _load_config_yaml, save_config as _save_config_yaml
 from deskbot_server.env import load_dotenv
 from deskbot_server.llm.utils import llm_pb_scenes_prompt_appendix, parse_llm_reply
+from deskbot_server.camera_face_config_store import (
+    load_camera_face_cfg_file,
+    normalize_camera_face_document,
+    save_camera_face_cfg_file,
+)
+from deskbot_server.camera_face_tune import apply_camera_face_tune
+from deskbot_server.constants import (
+    CAMERA_FACE_CFG_FILE,
+    FACE_EXPR_SCENES_FILE,
+    FACE_MOUTH_BY_PHONEME_FILE,
+    FACE_PROFILES_FILE,
+    SCENE_PLAYBOOKS_FILE,
+    SERVO_CFG_FILE,
+    USER_MEMORY_FILE,
+)
+from deskbot_server.face_expr_scenes_store import (
+    load_face_expr_scenes_file,
+    normalize_face_expr_scenes,
+    save_face_expr_scenes_file,
+)
+from deskbot_server.scene_playbooks_store import (
+    load_scene_playbooks_file,
+    normalize_scene_playbooks,
+    save_scene_playbooks_file,
+)
+from deskbot_server.face_mouth_config_store import (
+    face_mouth_api_payload,
+    load_face_mouth_cfg_file,
+    normalize_face_mouth_groups,
+    save_face_mouth_cfg_file,
+)
+from deskbot_server.application.face_registration import register_face_for_device
+from deskbot_server.face_profiles_store import load_face_profiles
+from deskbot_server.memory_store import add_memory, delete_memory, list_memory_for_device
 from deskbot_server.paths import DEFAULT_CONFIG_PATH
+from deskbot_server.servo_config_store import (
+    load_servo_cfg_file,
+    normalize_servo_document,
+    save_servo_cfg_file,
+)
 
 CONFIG_PATH = DEFAULT_CONFIG_PATH
 
@@ -177,8 +216,7 @@ async def _phoneme_tts_ws_call(ws_url: str, text: str, spk_id: int) -> tuple[byt
 
 
 def save_config(cfg):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    _save_config_yaml(cfg, CONFIG_PATH)
 
 
 def tcp_alive(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -223,12 +261,15 @@ def debug_devices():
 def debug_llm():
     cfg = load_config()
     llm_cfg = cfg.get("llm", {}) or {}
+    from deskbot_server.llm.utils import llm_pb_plan_prompt_appendix
+
     return render_template(
         "debug_llm.html",
         active_nav="llm",
         llm_model=llm_cfg.get("model_name", ""),
         llm_base_url=llm_cfg.get("base_url", ""),
         llm_system_prompt=llm_cfg.get("system_prompt", ""),
+        llm_plan_appendix=llm_pb_plan_prompt_appendix(),
     )
 
 
@@ -383,6 +424,12 @@ def llm_chat():
     px = llm_pb_scenes_prompt_appendix()
     if px:
         sys_content += "\n" + px
+    from deskbot_server.llm.utils import llm_recognized_faces_prompt_appendix
+
+    debug_device_id = str(payload.get("device_id") or "").strip()
+    fx = llm_recognized_faces_prompt_appendix(debug_device_id)
+    if fx:
+        sys_content += "\n\n" + fx
 
     messages = [
         {
@@ -434,7 +481,9 @@ def llm_chat():
                 "ok": True,
                 "reply": parsed["reply"],
                 "raw": parsed["raw"],
-                "actions": parsed["actions"],
+                "moves": parsed.get("moves") or [],
+                "anims": parsed.get("anims") or [],
+                "tools": parsed.get("tools") or [],
                 "servo": parsed.get("servo") or [],
                 "scenes": parsed.get("scenes") or [],
                 "json_ok": parsed["json_ok"],
@@ -446,6 +495,310 @@ def llm_chat():
         )
     except Exception as exc:
         return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+
+@app.get("/api/servo_config")
+def api_servo_config_get():
+    try:
+        cfg = load_servo_cfg_file()
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    if cfg is None:
+        return jsonify(
+            {
+                "ok": True,
+                "exists": False,
+                "file": os.path.basename(SERVO_CFG_FILE),
+                "t": time.time(),
+            }
+        )
+    return jsonify(
+        {
+            "ok": True,
+            "exists": True,
+            "config": cfg,
+            "file": os.path.basename(SERVO_CFG_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.post("/api/servo_config")
+def api_servo_config_post():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "body must be a JSON object", "t": time.time()}), 400
+    try:
+        cfg = normalize_servo_document(payload, require_presets=True)
+        save_servo_cfg_file(cfg)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 400
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "config": cfg,
+            "file": os.path.basename(SERVO_CFG_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.get("/api/camera_face_config")
+def api_camera_face_config_get():
+    cfg = load_config()
+    base = dict(cfg.get("camera_face") or {})
+    try:
+        file_cfg = load_camera_face_cfg_file()
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    merged = {**base, **(file_cfg or {})}
+    try:
+        norm = normalize_camera_face_document(merged)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "config": norm,
+            "file": os.path.basename(CAMERA_FACE_CFG_FILE),
+            "exists": file_cfg is not None,
+            "t": time.time(),
+        }
+    )
+
+
+@app.post("/api/camera_face_config")
+def api_camera_face_config_post():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "body must be a JSON object", "t": time.time()}), 400
+    try:
+        cfg = normalize_camera_face_document(payload)
+        save_camera_face_cfg_file(cfg)
+        apply_camera_face_tune(cfg)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 400
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "config": cfg,
+            "file": os.path.basename(CAMERA_FACE_CFG_FILE),
+            "hint": "检测器 num_faces/置信度需 ESP32 重连 /camera 后生效",
+            "t": time.time(),
+        }
+    )
+
+
+@app.get("/api/face_profiles")
+def api_face_profiles_get():
+    try:
+        profiles = load_face_profiles()
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "profiles": profiles,
+            "file": os.path.basename(FACE_PROFILES_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.post("/api/face_profiles/register")
+def api_face_profiles_register():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "body must be a JSON object", "t": time.time()}), 400
+    name = str(payload.get("name") or "").strip()
+    device_id = str(payload.get("device_id") or "").strip()
+    face_id_raw = payload.get("face_id")
+    if not name:
+        return jsonify({"ok": False, "error": "name required", "t": time.time()}), 400
+    if not device_id or face_id_raw is None:
+        return jsonify({"ok": False, "error": "device_id and face_id required", "t": time.time()}), 400
+    try:
+        face_id = int(face_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "face_id must be int", "t": time.time()}), 400
+    try:
+        out = register_face_for_device(device_id, name, face_id=face_id, extra=payload)
+        profile = out["profile"]
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 400
+    return jsonify(
+        {
+            "ok": True,
+            "profile": profile,
+            "file": os.path.basename(FACE_PROFILES_FILE),
+            "hint": (
+                "档案已写入（InsightFace 512 维）；请 ESP32 重连 /camera 后正对镜头识别。"
+                "旧几何档案需重新「保存人名」"
+            ),
+            "t": time.time(),
+        }
+    )
+
+
+@app.get("/api/user_memory")
+def api_user_memory_get():
+    device_id = str(request.args.get("device_id") or "").strip()
+    try:
+        entries = list_memory_for_device(device_id or None)
+    except (OSError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "entries": entries,
+            "file": os.path.basename(USER_MEMORY_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.post("/api/user_memory")
+def api_user_memory_post():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "body must be a JSON object", "t": time.time()}), 400
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return jsonify({"ok": False, "error": "text required", "t": time.time()}), 400
+    device_id = str(payload.get("device_id") or "").strip()
+    try:
+        entry = add_memory(text, device_id=device_id or None)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 400
+    return jsonify({"ok": True, "entry": entry, "t": time.time()})
+
+
+@app.delete("/api/user_memory/<entry_id>")
+def api_user_memory_delete(entry_id: str):
+    try:
+        ok = delete_memory(entry_id)
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    if not ok:
+        return jsonify({"ok": False, "error": "not found", "t": time.time()}), 404
+    return jsonify({"ok": True, "id": entry_id, "t": time.time()})
+
+
+@app.get("/api/face_mouth_by_phoneme")
+def api_face_mouth_by_phoneme_get():
+    try:
+        groups = load_face_mouth_cfg_file(seed_if_missing=True)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    payload = face_mouth_api_payload(groups or [])
+    return jsonify(
+        {
+            "ok": True,
+            "exists": os.path.isfile(FACE_MOUTH_BY_PHONEME_FILE),
+            **payload,
+            "file": os.path.basename(FACE_MOUTH_BY_PHONEME_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.post("/api/face_mouth_by_phoneme")
+def api_face_mouth_by_phoneme_post():
+    payload = request.get_json(silent=True)
+    try:
+        groups = normalize_face_mouth_groups(payload if payload is not None else [])
+        save_face_mouth_cfg_file(groups)
+        out = face_mouth_api_payload(groups)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 400
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            **out,
+            "file": os.path.basename(FACE_MOUTH_BY_PHONEME_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.get("/api/face_expr_scenes")
+def api_face_expr_scenes_get():
+    try:
+        rows = load_face_expr_scenes_file(seed_if_missing=True)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "config": rows or [],
+            "exists": os.path.isfile(FACE_EXPR_SCENES_FILE),
+            "file": os.path.basename(FACE_EXPR_SCENES_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.post("/api/face_expr_scenes")
+def api_face_expr_scenes_post():
+    payload = request.get_json(silent=True)
+    try:
+        rows = normalize_face_expr_scenes(payload if payload is not None else [])
+        save_face_expr_scenes_file(rows)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 400
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "config": rows,
+            "file": os.path.basename(FACE_EXPR_SCENES_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.get("/api/scene_playbooks")
+def api_scene_playbooks_get():
+    try:
+        rows = load_scene_playbooks_file(seed_if_missing=True)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "config": rows or [],
+            "exists": os.path.isfile(SCENE_PLAYBOOKS_FILE),
+            "file": os.path.basename(SCENE_PLAYBOOKS_FILE),
+            "t": time.time(),
+        }
+    )
+
+
+@app.post("/api/scene_playbooks")
+def api_scene_playbooks_post():
+    payload = request.get_json(silent=True)
+    try:
+        rows = normalize_scene_playbooks(payload if payload is not None else [])
+        save_scene_playbooks_file(rows)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 400
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc), "t": time.time()}), 500
+    return jsonify(
+        {
+            "ok": True,
+            "config": rows,
+            "file": os.path.basename(SCENE_PLAYBOOKS_FILE),
+            "t": time.time(),
+        }
+    )
 
 
 @app.get("/api/health")

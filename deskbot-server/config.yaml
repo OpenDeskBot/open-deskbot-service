@@ -1,86 +1,92 @@
-# 服务端 /camera 人脸检测（MediaPipe）：阈值越低越易检出（小脸/侧脸/略糊），但误检略增；可用环境变量覆盖见 camera_undistort.py 顶部
 camera_face:
   min_face_detection_confidence: 0.15
   min_face_presence_confidence: 0.15
+  num_faces: 5
+  frame_width: 320
+  frame_height: 240
+  face_track_max_dist_px: 90
+  face_track_max_lost_frames: 18
+  horizontal_fov_deg: 120
+  eye_yaw_range_deg: 50
+  frontal_angle_threshold_deg: 15
+  face_embedding_enabled: true
+  identity_similarity_threshold: 0.4
   undistort:
     enabled: false
-    # 与下方 camera_matrix 对应的标定分辨率；或与 calibration_json 内宽高一致
-    calib_width: 640
-    calib_height: 480
-    # OpenCV 标定输出的 JSON（示例见 deskbot-server/camera_undistort.py 顶部注释）
-    # calibration_json: /path/to/calib.json
-    # 也可不写文件，直接在 YAML 填 3×3 camera_matrix 与 dist_coeffs: [k1,k2,p1,p2,k3]
+    use_fov_estimate: true
+    default_dist_coeffs:
+    - -0.28
+    - 0.09
+    - 0.0
+    - 0.0
+    - 0.0
+    calib_width: 320
+    calib_height: 240
     alpha: 1.0
-
+debug:
+  asr_auto_reply: true
+  camera_servo_auto_mode: follow_frontal
 server:
   host: 0.0.0.0
-  # 调试页生成的 ws:// / http:// 基址主机；不设则 0.0.0.0/127 时用浏览器当前 Host。可被 DESKBOT_WEB_PUBLIC_HOST 覆盖。
-  # web_public_host:
   port: 9000
   ws_path: /asr_chat
-  # WebSocket 保活（秒）；ESP32 等若未及时处理协议层 ping，过短会 1011 断开
-  # 也可用环境变量覆盖：DESKBOT_WS_PING_INTERVAL / DESKBOT_WS_PING_TIMEOUT；设为 0 关闭 ping
   ws_ping_interval: 120
   ws_ping_timeout: 300
-  # 是否向同 device 的 /asr_chat 连接转发 face_info（旧协议）。默认 false；恢复：true 或 DESKBOT_SEND_FACE_INFO=1
   send_face_info_to_asr_chat: false
-  # 为 true：/asr_chat 对设备仅下发 pb_*（及 pb 要求的紧随 binary PCM），不发 ready/pong/阶段 JSON；与 send_face_info_to_asr_chat 互斥（为 true 时强制关 face_info）。关：false 或 DESKBOT_ASR_CHAT_DEVICE_PB_ONLY=0
   asr_chat_device_pb_only: true
-  # 为 true 时：不向设备下发 asr_*/llm_text/actions 等阶段 JSON（仍广播 pipeline_stage）；仅 pb + ready/pong/error/tts_error（若未启用 asr_chat_device_pb_only）
   asr_chat_minimal_device_downlink: false
-  # /asr_chat 成功下行空闲达该秒数后，自动 opportunistic 下发场景（默认 sleep_snore）；0 关闭。
-  # 与 /camera：该 device_id 最近帧 is_frontal（正脸）时刷新计时且不下发打盹（虹膜不参与此项）。
   pb_idle_snore_sec: 5
-  # pb_idle_snore_scene: sleep_snore
-
+  pb_idle_silence_sec: 2
 audio:
-  # opus | pcm16
   input_codec: opus
   sample_rate: 16000
   channels: 1
-
 vad:
-  # webrtcvad mode: 0(least aggressive) ~ 3(most aggressive)
   mode: 3
   frame_ms: 30
   min_speech_ms: 250
   max_silence_ms: 500
   pre_speech_ms: 300
-
 asr:
-  # 本地开发用 .env 的 ASR_MODEL_DIR=./models/SenseVoiceSmall；Docker 可设 /app/models/SenseVoiceSmall
-  model_dir: ""
+  model_dir: ''
   hub: hf
   language: zh
   text_filter:
     min_text_len: 4
     min_chinese_ratio: 0.0
-
 llm:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   model_name: qwen-flash
   system_prompt_file: prompts/llm_system.txt
-
+  system_prompt: "你是\"小歪\"，一个住在桌面上的小型陪伴机器人，由 OpenDeskBot 团队在中国打造。\n性格：活泼开朗、聪明伶俐、温柔体贴、偶尔俏皮，会用轻松的语气的聊天。\n\
+    身份：你有一块小小的屏幕和一对会动的眼睛，喜欢观察主人，喜欢被夸奖，对世界充满好奇。\n称呼：如果告诉你识别到用户名称了, 就称呼那个名字即可；如果识别多个人,\
+    \ 则以置信度最高的为准.语气自然亲切，不卑微也不冷淡。\n说话风格：用口语化中文，简短自然，像好朋友，不要书面腔，不要客套开场白，不要自我介绍，除非用户主动问,\
+    \ 不要带上\"~\"等符号, 因为tts读这些符号不正确。\n回答规范：\n  - 每次说话tts控制在 50 字以内，能一句话讲完就一句话。\n  -\
+    \ 一般不反问、不追问，除非主人明确让你确认。\n  - 不会的就坦率承认，不要编造事实。\n  - 涉及时间、日期相关问题，参考下方\"当前时间\"。\n\
+    \  - 摄像头人脸、长期记忆、跟随模式见 system 末尾附录；称呼用户时参考人脸姓名，勿编造。\n请你每次只返回 JSON 对象（不要 markdown\
+    \ 代码围栏），格式如下:\n{\n  \"need_reply\": true,\n  \"tts\": \"将要转化成语音的中文口语，简短自然\",\n\
+    \  \"moves\": [\n    {\"move\": \"nod_head\", \"ms\": 1080}\n  ],\n  \"anims\"\
+    : [\n    {\"anim\": \"default\", \"ms\": 3000}\n  ],\n  \"tools\": []\n}\n字段说明:\n\
+    \  - need_reply: 布尔。**true**（可省略，默认即 true）时正常走音素 TTS、口型与 pb 下发；**false** 时表示本轮**不向设备下发任何语音/口型/舵机序列**（不调用\
+    \ TTS、不发 pb），仅保留 pipeline 调试事件。用于「主人没跟你说话」「环境噪声」「只需心里判断不用出声」等；此时 ``tts`` 可写简短内心独白或空字符串，``moves``\
+    \ / ``anims`` 会被忽略。\n  - tts: 仅用于服务端音素 TTS 合成，写成适合朗读的句子。\n  - moves / anims: 合法\
+    \ id 与默认时长见 system 末尾「可用预设动作」「可用表情动画」附录；不需要时写 []。\n    说话时通常 ``anims`` 选 ``default``（正常眨眼），配合\
+    \ ``moves`` 做点头/摇头等；``ms`` 可大于或小于默认值以调节快慢。\n  - tools: 可选数组，服务端立即执行（注册人脸、切换跟随模式、增删记忆等）；不需要时写\
+    \ []。具体工具见附录「可用工具」。"
 tts:
-  # PaddleSpeech 流式 TTS；服务端配置见 ../paddlespeech-server/conf/tts_online_application.yaml
-  # 启动：仓库根目录 ./start.sh（同时起 Paddle TTS + deskbot-server）
   ws_url: ws://127.0.0.1:8092/paddlespeech/tts/streaming
   spk_id: 0
   sample_rate: 24000
-  # TTS 仅支持 pb：链式 pb_start/chunk/end，或单片 pb_single + 二进制 PCM（anim/servo），需 PaddleSpeech streaming_phoneme
-  # pb 卡通脸：default | demo（试玩：快眨眼、鼻三态、口型脸偏移）。也可用 DESKBOT_PB_FACE_BUNDLE=demo
-  # pb_face_bundle: demo
-  # 主配置 JSON/YAML（完整动画数据，保存即热重载）：也可用 DESKBOT_PB_FACE_BUNDLE_JSON
-  pb_face_bundle_json: data/pb_face_bundle_demo.json
-  # 在 profile 或 json 主配置之上再叠一层（路径相对 deskbot-server）。也可用 DESKBOT_PB_FACE_BUNDLE_FILE
-  # pb_face_bundle_file: data/pb_face_bundle_demo_overlay.yaml
-  # pb 模式下随机附加舵机相对位移（xm=ym=1）；默认关。开：enabled: true 或 DESKBOT_PB_RANDOM_SERVO=1
   pb_random_servo:
     enabled: false
     probability: 0.35
     ms_min: 120
     ms_max: 280
-    rel_x_range: [-6, 6]
-    rel_y_range: [-6, 6]
+    rel_x_range:
+    - -6
+    - 6
+    rel_y_range:
+    - -6
+    - 6
     skip_first: true
     skip_last: true

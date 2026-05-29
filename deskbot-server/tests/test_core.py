@@ -34,11 +34,13 @@ def test_app_settings_env_override_pb_only():
 
 
 def test_parse_llm_reply_json():
-    raw = '{"need_reply": true, "tts": "你好", "servo": [], "scenes": []}'
+    raw = '{"need_reply": true, "tts": "你好", "moves": [], "anims": []}'
     parsed = parse_llm_reply(raw)
     assert parsed["json_ok"] is True
     assert parsed["reply"] == "你好"
     assert parsed["need_reply"] is True
+    assert parsed["moves"] == []
+    assert parsed["anims"] == []
 
 
 def test_parse_llm_reply_plain_text_fallback():

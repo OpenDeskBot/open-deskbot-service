@@ -8,7 +8,7 @@ import random
 from collections import deque
 from typing import Any
 
-from deskbot_server.pb.shapes import PB_ACTION_REPLACE
+from deskbot_server.pb.shapes import PB_ACTION_REPLACE, PB_LEVEL_TASK
 
 logger = logging.getLogger("deskbot-server")
 
@@ -268,13 +268,14 @@ def pb_json_messages(
     anim_rows: list[dict[str, Any]],
     pcm_per_idx: list[bytes],
     action: str = PB_ACTION_REPLACE,
+    level: int = PB_LEVEL_TASK,
 ) -> list[tuple[dict[str, Any], bytes]]:
     """生成 ``(pb 字典, 紧随其后的 PCM 或 b'')`` 列表；有 PCM 时字典内含 ``audio.next_bin``。
 
     单片 ``n == 1`` 使用 ``pb_single``；多片为 ``pb_start`` → ``pb_chunk``* → ``pb_end``。
 
-    ``action``：``replace`` / ``append`` / ``opportunistic``，写入每条 pb JSON，语义见协议文档。
-    缺省 ``replace``（与旧版「新序列打断旧序列」一致）。"""
+    ``action``：``replace`` / ``append`` / ``default``；``level``：0–3，语义见协议文档。
+    缺省 ``replace`` + ``level=1``（任务态）。"""
     n = len(anim_rows)
     if n == 0:
         return []
@@ -300,8 +301,9 @@ def pb_json_messages(
             "chunk_ms": int(row.get("chunk_ms") or 0),
             "anim": row["anim"],
             "phoneme": row.get("phoneme", ""),
-            "pb_ver": 1,
+            "pb_ver": 2,
             "action": action,
+            "level": int(level),
         }
         if is_first or n == 1:
             msg["sr"] = int(sample_rate)

@@ -45,8 +45,18 @@ class ChatService:
     def is_valid_asr_text(self, text: str) -> bool:
         return self._asr.is_valid_text(text)
 
-    async def llm(self, text: str, *, device_context: str | None = None) -> str:
-        return await self._llm.complete(text, device_context=device_context)
+    async def llm(
+        self,
+        text: str,
+        *,
+        device_context: str | None = None,
+        device_id: str | None = None,
+    ) -> str:
+        return await self._llm.complete(
+            text,
+            device_context=device_context,
+            device_id=device_id,
+        )
 
     async def tts_phoneme_segments(self, text: str) -> tuple[int, list[dict]]:
         sr, segs = await self._tts.synthesize_phoneme_segments(text)

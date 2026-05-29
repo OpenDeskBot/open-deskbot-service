@@ -1,21 +1,53 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import logging
 import os
 import time
 import uuid
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from deskbot_server.auto_reply import get_asr_voice_auto_reply_enabled, set_asr_voice_auto_reply_enabled
-from deskbot_server.constants import PB_SCENES_FILE
+from deskbot_server.auto_reply import get_asr_voice_auto_reply_enabled
+from deskbot_server.debug_prefs_store import (
+    debug_prefs_snapshot,
+    get_camera_servo_auto_mode,
+    normalize_camera_servo_auto_mode,
+    persist_asr_auto_reply,
+    persist_camera_servo_auto_mode,
+)
+from deskbot_server.constants import FACE_EXPR_SCENES_FILE, FACE_MOUTH_BY_PHONEME_FILE, SERVO_CFG_FILE
+from deskbot_server.face_expr_scenes_store import (
+    design_frames_to_pb_chain,
+    find_design_scene_by_name,
+    load_face_expr_scenes_file,
+    normalize_face_expr_scenes,
+    save_face_expr_scenes_file,
+)
+from deskbot_server.face_mouth_config_store import (
+    face_mouth_api_payload,
+    load_face_mouth_cfg_file,
+    normalize_face_mouth_groups,
+    save_face_mouth_cfg_file,
+)
+from deskbot_server.servo_config_store import (
+    load_servo_cfg_file,
+    normalize_servo_document,
+    save_servo_cfg_file,
+)
 from deskbot_server.pb.scenes import (
-    _load_pb_scenes_document,
     _pb_scene_entry_by_name,
     _pb_scene_keys_sorted,
     _prepare_pb_scene_chain_frames,
+)
+from deskbot_server.pb.shapes import (
+    PB_ACTION_APPEND,
+    PB_ACTION_DEFAULT,
+    PB_ACTION_REPLACE,
+    PB_LEVEL_DEBUG,
+    apply_pb_dispatch_fields,
 )
 from deskbot_server.util import _extract_device_id, _parse_query
 from deskbot_server.ws.registry import DeviceRegistry
@@ -26,6 +58,15 @@ if TYPE_CHECKING:
     from deskbot_server.ws.device_pipeline import DevicePipelineBroker
 
 logger = logging.getLogger("deskbot-server")
+
+
+def _registry_channels(registry: DeviceRegistry, device_id: str) -> dict[str, int]:
+    for row in registry.snapshot():
+        if row.get("device_id") == device_id:
+            ch = row.get("channels")
+            return dict(ch) if isinstance(ch, dict) else {}
+    return {}
+
 
 def _build_http_request_handler(
     device_pipeline_broker: DevicePipelineBroker,
@@ -38,23 +79,27 @@ def _build_http_request_handler(
 
     - GET /api/devices：返回当前注册的设备列表（源自 DeviceRegistry）
     - GET /api/pipeline_recent?device_id=xxx&limit=100：返回滚动窗口内的事件
-    - GET /api/device_servo?device_id=…&dyaw=…&dpitch=…&ms=…&xm=…&ym=…&action=…：向该设备
+    - GET /api/device_servo?device_id=…&dyaw=…&dpitch=…&ms=…&xm=…&ym=…&action=…&level=…：向该设备
       已连接的 ``/asr_chat`` 下发仅含 ``servo`` 的 **单片** ``pb_single``。``xm``/``ym`` 缺省
-      ``0``（绝对，x/y 钳位 0–180）；``xm=ym=1`` 时 dyaw/dpitch 为相对增量（±90）。可选 ``action``：``replace`` / ``append`` / ``opportunistic``，缺省
-      ``opportunistic``（与调试舵机「队列空才入队」一致）。可选 ``with_scene`` / ``append_scene``：
+      ``0``（绝对，x/y 钳位 0–180）；``xm=ym=1`` 时 dyaw/dpitch 为相对增量（±90）。可选 ``action``：``replace`` / ``append`` / ``default``，缺省
+      ``replace``。可选 ``level``：``0``–``3``，缺省 ``3``（调试态）。可选 ``with_scene`` / ``append_scene``：
       与 ``pb_single`` 在**同一条** ``device_pb_only`` 链锁内**原子**顺序下发该场景
       的 ``pb_start``→…→``pb_end``（与 ``/api/device_pb_scene`` 同源 JSON，无 PCM），
       用于注视/跟随舵机与 ``happy_smile`` 同批入队。下位机约定：仅一帧时用
       ``pb_single``；多帧须以 ``pb_start`` 开头、``pb_end`` 收尾，勿单发 ``pb_end`` 冒充单片。
-    - GET /api/device_pb_scenes：列出 ``data/pb_scenes_idle_sleep_guard.json`` 中 ``scenes`` 下
-      含非空 ``frames`` 的场景 id（按名排序）。
-    - GET /api/device_pb_scene?device_id=…&scene=<id>：按上述文件 ``scenes.<id>`` 向该设备
+    - GET /api/device_pb_scenes：列出 ``data/face_expr_scenes.json`` 中的场景 name。
+    - GET /api/device_pb_scene?device_id=…&scene=<id>：按 ``face_expr_scenes.json`` 向该设备
       ``/asr_chat`` **顺序**下发 ``pb_start`` → ``pb_chunk``* → ``pb_end``（含 ``anim``+``servo``，无音频）。
       ``scene`` 与文件中的 key **不区分大小写**。
     - GET /api/asr_auto_reply：返回 ``{"ok", "enabled"}`` 是否对 ``/asr_chat`` 执行 LLM+TTS；
       带 ``?enabled=1|0|true|false`` 时同时写入开关（调试页「启用自动应答」）。
     - GET/POST /api/device_tts：``device_id`` + ``text``，跳过 LLM 直接音素 TTS 并下发 pb；
       可选 ``scene``：与 TTS 在同一条 pb 链锁内顺序追加该场景帧（先语音后场景）。
+    - GET/POST /api/scene_playbook/run：``device_id`` + ``playbook``（或 ``name`` 查表），
+      TTS/表情/舵机三轨在**同一条 pb 链**内与音素分片交错下发（非 TTS 结束后再播）。
+    - GET/POST /api/servo_config：读取/写入 ``data/servo.json`` 舵机限位/反向与 ``presets`` 动作预设。
+    - GET/POST /api/face_mouth_by_phoneme：读取/写入 ``data/face_mouth_by_phoneme.json`` 音素口型组表。
+    - POST /api/device_pb_anim：向设备下发仅含 ``anim`` 的单片 ``pb_single``（调试口型预览）。
     - GET /health：存活探针
     - 其它 /api/* 返回 404；非 WS 升级请求才会进入该分支。
     """
@@ -138,9 +183,9 @@ def _build_http_request_handler(
             if raw_e is not None:
                 se = str(raw_e).strip().lower()
                 if se in ("1", "true", "yes", "on"):
-                    set_asr_voice_auto_reply_enabled(True)
+                    persist_asr_auto_reply(True)
                 elif se in ("0", "false", "no", "off"):
-                    set_asr_voice_auto_reply_enabled(False)
+                    persist_asr_auto_reply(False)
                 else:
                     return _json_resp(
                         400,
@@ -150,7 +195,7 @@ def _build_http_request_handler(
                         },
                     )
                 logger.info(
-                    "[HTTP] /api/asr_auto_reply set enabled=%s peer=%s",
+                    "[HTTP] /api/asr_auto_reply set enabled=%s peer=%s (已写入 config.yaml)",
                     get_asr_voice_auto_reply_enabled(),
                     peer,
                 )
@@ -158,6 +203,71 @@ def _build_http_request_handler(
                 200,
                 {"ok": True, "enabled": get_asr_voice_auto_reply_enabled()},
             )
+
+        if path_only == "/api/camera_servo_auto_mode":
+            raw_m = qargs.get("mode")
+            if raw_m is None:
+                logger.info(
+                    "[HTTP] GET /api/camera_servo_auto_mode -> mode=%r peer=%s",
+                    get_camera_servo_auto_mode(),
+                    peer,
+                )
+            else:
+                norm = normalize_camera_servo_auto_mode(raw_m)
+                if str(raw_m).strip() and not norm and str(raw_m).strip().lower() not in (
+                    "",
+                    "off",
+                    "none",
+                ):
+                    return _json_resp(
+                        400,
+                        {
+                            "ok": False,
+                            "error": "invalid mode; use follow, follow_frontal, gaze or empty",
+                        },
+                    )
+                if str(raw_m).strip().lower() in ("", "off", "none"):
+                    norm = persist_camera_servo_auto_mode("")
+                else:
+                    norm = persist_camera_servo_auto_mode(norm)
+                logger.info(
+                    "[HTTP] /api/camera_servo_auto_mode set mode=%r peer=%s (已写入 config.yaml)",
+                    norm,
+                    peer,
+                )
+            return _json_resp(
+                200,
+                {"ok": True, "mode": get_camera_servo_auto_mode()},
+            )
+
+        if path_only == "/api/debug_prefs":
+            raw_ar = qargs.get("asr_auto_reply")
+            raw_mode = qargs.get("camera_servo_auto_mode")
+            if raw_ar is None and raw_mode is None:
+                return _json_resp(200, {"ok": True, **debug_prefs_snapshot()})
+            if raw_ar is not None:
+                se = str(raw_ar).strip().lower()
+                if se in ("1", "true", "yes", "on"):
+                    persist_asr_auto_reply(True)
+                elif se in ("0", "false", "no", "off"):
+                    persist_asr_auto_reply(False)
+                else:
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": "invalid asr_auto_reply"},
+                    )
+            if raw_mode is not None:
+                if str(raw_mode).strip().lower() in ("", "off", "none"):
+                    persist_camera_servo_auto_mode("")
+                else:
+                    norm = normalize_camera_servo_auto_mode(raw_mode)
+                    if not norm:
+                        return _json_resp(
+                            400,
+                            {"ok": False, "error": "invalid camera_servo_auto_mode"},
+                        )
+                    persist_camera_servo_auto_mode(norm)
+            return _json_resp(200, {"ok": True, **debug_prefs_snapshot()})
 
         if path_only == "/api/pipeline_recent":
             dev = _extract_device_id(qargs)
@@ -236,12 +346,24 @@ def _build_http_request_handler(
                         "t": time.time(),
                     },
                 )
-            act = (qargs.get("action") or "opportunistic").strip().lower()
-            if act not in ("replace", "append", "opportunistic"):
+            act = (qargs.get("action") or PB_ACTION_REPLACE).strip().lower()
+            if act not in (PB_ACTION_REPLACE, PB_ACTION_APPEND, PB_ACTION_DEFAULT):
                 return _json_resp(
                     400,
                     {
-                        "error": "invalid action (use replace|append|opportunistic)",
+                        "error": "invalid action (use replace|append|default)",
+                        "t": time.time(),
+                    },
+                )
+            try:
+                pb_level = int(qargs.get("level", PB_LEVEL_DEBUG))
+            except (TypeError, ValueError):
+                pb_level = -1
+            if pb_level not in (0, 1, 2, 3):
+                return _json_resp(
+                    400,
+                    {
+                        "error": "invalid level (use 0|1|2|3)",
                         "t": time.time(),
                     },
                 )
@@ -251,7 +373,9 @@ def _build_http_request_handler(
                 "req": req_id,
                 "idx": 0,
                 "chunk_ms": ms,
+                "pb_ver": 2,
                 "action": act,
+                "level": pb_level,
                 "servo": {
                     "xm": xm,
                     "ym": ym,
@@ -265,8 +389,7 @@ def _build_http_request_handler(
             tail_frames: Optional[list[dict]] = None
             scene_req: Optional[str] = None
             if with_scene:
-                doc_ws = _load_pb_scenes_document()
-                if doc_ws and _pb_scene_entry_by_name(doc_ws, with_scene):
+                if _pb_scene_entry_by_name({}, with_scene):
                     scene_req = uuid.uuid4().hex[:16]
                     tail_frames = _prepare_pb_scene_chain_frames(
                         with_scene, runtime_req=scene_req
@@ -301,7 +424,7 @@ def _build_http_request_handler(
                 n = 0
             logger.info(
                 "[HTTP] GET /api/device_servo peer=%s device_id=%s "
-                "dyaw=%s dpitch=%s xm=%d ym=%d action=%s -> pb_single ix=%d iy=%d ms=%d delivered=%d%s",
+                "dyaw=%s dpitch=%s xm=%d ym=%d action=%s level=%d -> pb_single ix=%d iy=%d ms=%d delivered=%d%s",
                 peer,
                 dev,
                 dyaw,
@@ -309,6 +432,7 @@ def _build_http_request_handler(
                 xm,
                 ym,
                 act,
+                pb_level,
                 ix,
                 iy,
                 ms,
@@ -322,6 +446,7 @@ def _build_http_request_handler(
                     "device_id": dev,
                     "type": "pb_single",
                     "action": act,
+                    "level": pb_level,
                     "servo": payload["servo"],
                     "req": req_id,
                     "delivered": n,
@@ -333,8 +458,7 @@ def _build_http_request_handler(
             )
 
         if path_only == "/api/device_pb_scenes":
-            doc = _load_pb_scenes_document()
-            keys = _pb_scene_keys_sorted(doc)
+            keys = _pb_scene_keys_sorted(None)
             logger.info(
                 "[HTTP] GET /api/device_pb_scenes peer=%s -> %d scene(s)",
                 peer,
@@ -345,7 +469,7 @@ def _build_http_request_handler(
                 {
                     "ok": True,
                     "scenes": keys,
-                    "file": os.path.basename(PB_SCENES_FILE),
+                    "file": os.path.basename(FACE_EXPR_SCENES_FILE),
                     "t": time.time(),
                 },
             )
@@ -455,6 +579,126 @@ def _build_http_request_handler(
                 },
             )
 
+        if path_only == "/api/scene_playbook/run":
+            from deskbot_server.application.chat_flow import run_device_playbook
+            from deskbot_server.infrastructure.ws.downlink_adapter import WsDownlinkAdapter
+            from deskbot_server.scene_playbooks_store import (
+                find_playbook_by_name,
+                load_scene_playbooks_file,
+                normalize_playbook,
+            )
+
+            dev = ""
+            playbook_raw: object = None
+            if method == "POST":
+                try:
+                    raw_body = (getattr(request, "body", None) or b"").decode("utf-8")
+                    payload = json.loads(raw_body) if raw_body.strip() else {}
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": "invalid JSON body", "t": time.time()},
+                    )
+                if isinstance(payload, dict):
+                    dev = str(payload.get("device_id") or "").strip()
+                    if "playbook" in payload:
+                        playbook_raw = payload.get("playbook")
+                    elif payload.get("name"):
+                        rows = load_scene_playbooks_file(seed_if_missing=False) or []
+                        playbook_raw = find_playbook_by_name(rows, str(payload.get("name")))
+            else:
+                dev = (qargs.get("device_id") or "").strip()
+                name_q = (qargs.get("name") or "").strip()
+                if name_q:
+                    rows = load_scene_playbooks_file(seed_if_missing=False) or []
+                    playbook_raw = find_playbook_by_name(rows, name_q)
+            if not dev:
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": "missing device_id", "t": time.time()},
+                )
+            if not playbook_raw:
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": "missing playbook or unknown name", "t": time.time()},
+                )
+            try:
+                playbook = normalize_playbook(playbook_raw)
+            except ValueError as exc:
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": str(exc), "t": time.time()},
+                )
+            ws = await asr_chat_hub.first_ws(dev)
+            if ws is None:
+                return _json_resp(
+                    200,
+                    {
+                        "ok": False,
+                        "error": "device not connected on /asr_chat",
+                        "device_id": dev,
+                        "delivered": 0,
+                        "hint": "请确认 ESP32 已用相同 device_id 连接 /asr_chat",
+                        "t": time.time(),
+                    },
+                )
+            req_id = uuid.uuid4().hex[:16]
+            settings = chat.settings
+            broker = device_pipeline_broker
+
+            async def _playbook_job() -> None:
+                downlink = WsDownlinkAdapter(
+                    ws,
+                    settings=settings,
+                    device_id=dev,
+                    dp_broker=broker,
+                )
+                try:
+                    turn = await run_device_playbook(
+                        downlink,
+                        chat,
+                        playbook,
+                        request_id=req_id,
+                        device_id=dev,
+                    )
+                    ok = (turn.status or "ok") == "ok" and not turn.error
+                    logger.info(
+                        "[HTTP] /api/scene_playbook/run done device_id=%s req=%s name=%s ok=%s err=%s",
+                        dev,
+                        req_id,
+                        playbook.get("name"),
+                        ok,
+                        turn.error,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[HTTP] /api/scene_playbook/run failed device_id=%s req=%s",
+                        dev,
+                        req_id,
+                    )
+
+            asyncio.create_task(_playbook_job())
+            logger.info(
+                "[HTTP] %s /api/scene_playbook/run accepted peer=%s device_id=%s req=%s name=%s",
+                method,
+                peer,
+                dev,
+                req_id,
+                playbook.get("name"),
+            )
+            return _json_resp(
+                200,
+                {
+                    "ok": True,
+                    "accepted": True,
+                    "device_id": dev,
+                    "name": playbook.get("name"),
+                    "req": req_id,
+                    "interleaved": True,
+                    "t": time.time(),
+                },
+            )
+
         if path_only == "/api/device_pb_scene":
             dev = (qargs.get("device_id") or "").strip()
             scene_q = (qargs.get("scene") or "").strip()
@@ -468,19 +712,10 @@ def _build_http_request_handler(
                     400,
                     {"error": "missing scene", "t": time.time()},
                 )
-            doc = _load_pb_scenes_document()
-            if not doc:
-                return _json_resp(
-                    500,
-                    {
-                        "error": "cannot read or parse scenes file",
-                        "path": PB_SCENES_FILE,
-                        "t": time.time(),
-                    },
-                )
-            valid = _pb_scene_keys_sorted(doc)
-            sc_obj = _pb_scene_entry_by_name(doc, scene_q)
-            if sc_obj is None:
+            req_id = uuid.uuid4().hex[:16]
+            ent = _pb_scene_entry_by_name({}, scene_q)
+            if ent is None:
+                valid = _pb_scene_keys_sorted(None)
                 return _json_resp(
                     400,
                     {
@@ -489,26 +724,13 @@ def _build_http_request_handler(
                         "t": time.time(),
                     },
                 )
-            raw_frames = sc_obj.get("frames")
-            if not isinstance(raw_frames, list) or not raw_frames:
-                return _json_resp(
-                    500,
-                    {"error": f"scene {scene_q!r} has no frames", "t": time.time()},
-                )
-            req_id = uuid.uuid4().hex[:16]
-            frames: list[dict] = []
-            for fr in raw_frames:
-                if not isinstance(fr, dict):
-                    continue
-                one = copy.deepcopy(fr)
-                one["req"] = req_id
-                frames.append(one)
+            frames = design_frames_to_pb_chain(ent.get("frames") or [], runtime_req=req_id)
             if not frames:
                 return _json_resp(
                     500,
-                    {"error": "no valid frame objects", "t": time.time()},
+                    {"error": "empty frames", "t": time.time()},
                 )
-            scene_log = scene_q.strip().lower()
+            scene_log = str(ent.get("name") or scene_q).strip().lower()
 
             logger.info(
                 "[HTTP] GET /api/device_pb_scene peer=%s device_id=%s scene=%s req=%s frames=%d",
@@ -560,6 +782,451 @@ def _build_http_request_handler(
                     "frames": len(frames),
                     "delivered": n,
                     "hint": hint,
+                    "t": time.time(),
+                },
+            )
+
+        if path_only == "/api/servo_config":
+            if method == "GET":
+                try:
+                    cfg = load_servo_cfg_file()
+                except (OSError, json.JSONDecodeError, ValueError) as exc:
+                    logger.warning(
+                        "[HTTP] GET /api/servo_config read failed peer=%s err=%s",
+                        peer,
+                        exc,
+                    )
+                    return _json_resp(
+                        500,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                if cfg is None:
+                    return _json_resp(
+                        200,
+                        {
+                            "ok": True,
+                            "exists": False,
+                            "file": os.path.basename(SERVO_CFG_FILE),
+                            "t": time.time(),
+                        },
+                    )
+                logger.info(
+                    "[HTTP] GET /api/servo_config peer=%s -> %s",
+                    peer,
+                    os.path.basename(SERVO_CFG_FILE),
+                )
+                return _json_resp(
+                    200,
+                    {
+                        "ok": True,
+                        "exists": True,
+                        "config": cfg,
+                        "file": os.path.basename(SERVO_CFG_FILE),
+                        "t": time.time(),
+                    },
+                )
+            if method == "POST":
+                try:
+                    raw_body = (getattr(request, "body", None) or b"").decode("utf-8")
+                    payload = json.loads(raw_body) if raw_body.strip() else {}
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": "invalid JSON body", "t": time.time()},
+                    )
+                try:
+                    cfg = normalize_servo_document(payload, require_presets=True)
+                    save_servo_cfg_file(cfg)
+                except ValueError as exc:
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "[HTTP] POST /api/servo_config write failed peer=%s err=%s",
+                        peer,
+                        exc,
+                    )
+                    return _json_resp(
+                        500,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                logger.info(
+                    "[HTTP] POST /api/servo_config peer=%s -> %s",
+                    peer,
+                    SERVO_CFG_FILE,
+                )
+                return _json_resp(
+                    200,
+                    {
+                        "ok": True,
+                        "config": cfg,
+                        "file": os.path.basename(SERVO_CFG_FILE),
+                        "t": time.time(),
+                    },
+                )
+            return _json_resp(
+                405,
+                {"ok": False, "error": "method not allowed", "t": time.time()},
+            )
+
+        if path_only == "/api/face_mouth_by_phoneme":
+            if method == "GET":
+                try:
+                    cfg = load_face_mouth_cfg_file(seed_if_missing=True)
+                except (OSError, json.JSONDecodeError, ValueError) as exc:
+                    logger.warning(
+                        "[HTTP] GET /api/face_mouth_by_phoneme read failed peer=%s err=%s",
+                        peer,
+                        exc,
+                    )
+                    return _json_resp(
+                        500,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                payload = face_mouth_api_payload(cfg or [])
+                logger.info(
+                    "[HTTP] GET /api/face_mouth_by_phoneme peer=%s groups=%d",
+                    peer,
+                    len(payload.get("config") or []),
+                )
+                return _json_resp(
+                    200,
+                    {
+                        "ok": True,
+                        "exists": os.path.isfile(FACE_MOUTH_BY_PHONEME_FILE),
+                        **payload,
+                        "file": os.path.basename(FACE_MOUTH_BY_PHONEME_FILE),
+                        "t": time.time(),
+                    },
+                )
+            if method == "POST":
+                try:
+                    raw_body = (getattr(request, "body", None) or b"").decode("utf-8")
+                    body = json.loads(raw_body) if raw_body.strip() else []
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": "invalid JSON body", "t": time.time()},
+                    )
+                try:
+                    groups = normalize_face_mouth_groups(body)
+                    save_face_mouth_cfg_file(groups)
+                    payload = face_mouth_api_payload(groups)
+                except ValueError as exc:
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "[HTTP] POST /api/face_mouth_by_phoneme write failed peer=%s err=%s",
+                        peer,
+                        exc,
+                    )
+                    return _json_resp(
+                        500,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                logger.info(
+                    "[HTTP] POST /api/face_mouth_by_phoneme peer=%s -> %s",
+                    peer,
+                    FACE_MOUTH_BY_PHONEME_FILE,
+                )
+                return _json_resp(
+                    200,
+                    {
+                        "ok": True,
+                        **payload,
+                        "file": os.path.basename(FACE_MOUTH_BY_PHONEME_FILE),
+                        "t": time.time(),
+                    },
+                )
+            return _json_resp(
+                405,
+                {"ok": False, "error": "method not allowed", "t": time.time()},
+            )
+
+        if path_only == "/api/device_pb_anim":
+            anim: Optional[dict[str, Any]] = None
+            dev = ""
+            chunk_ms = 500
+            act = PB_ACTION_REPLACE
+            pb_level = PB_LEVEL_DEBUG
+
+            if method == "GET":
+                dev = (qargs.get("device_id") or "").strip()
+                anim_b64 = (qargs.get("anim_b64") or "").strip()
+                if not dev:
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": "missing device_id", "t": time.time()},
+                    )
+                if not anim_b64:
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": "missing anim_b64", "t": time.time()},
+                    )
+                try:
+                    pad = (-len(anim_b64)) % 4
+                    anim = json.loads(
+                        base64.b64decode(anim_b64 + ("=" * pad)).decode("utf-8")
+                    )
+                except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": f"invalid anim_b64: {exc}", "t": time.time()},
+                    )
+                try:
+                    chunk_ms = int(qargs.get("chunk_ms", 500))
+                except (TypeError, ValueError):
+                    chunk_ms = 500
+                act = str(qargs.get("action") or PB_ACTION_REPLACE).strip().lower()
+                try:
+                    pb_level = int(qargs.get("level", PB_LEVEL_DEBUG))
+                except (TypeError, ValueError):
+                    pb_level = PB_LEVEL_DEBUG
+            elif method == "POST":
+                try:
+                    raw_body = (getattr(request, "body", None) or b"").decode("utf-8")
+                    body = json.loads(raw_body) if raw_body.strip() else {}
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": "invalid JSON body", "t": time.time()},
+                    )
+                dev = str(body.get("device_id") or "").strip()
+                anim = body.get("anim")
+                try:
+                    chunk_ms = int(body.get("chunk_ms", 500))
+                except (TypeError, ValueError):
+                    chunk_ms = 500
+                act = str(body.get("action") or PB_ACTION_REPLACE).strip().lower()
+                try:
+                    pb_level = int(body.get("level", PB_LEVEL_DEBUG))
+                except (TypeError, ValueError):
+                    pb_level = PB_LEVEL_DEBUG
+            else:
+                return _json_resp(
+                    405,
+                    {"ok": False, "error": "method not allowed", "t": time.time()},
+                )
+
+            if not dev:
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": "missing device_id", "t": time.time()},
+                )
+            if not isinstance(anim, dict) or not isinstance(anim.get("elements"), dict):
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": "anim.elements required", "t": time.time()},
+                )
+            chunk_ms = max(50, min(10000, chunk_ms))
+            if act not in (PB_ACTION_REPLACE, PB_ACTION_APPEND, PB_ACTION_DEFAULT):
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": "invalid action", "t": time.time()},
+                )
+            if pb_level not in (0, 1, 2, 3):
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": "invalid level", "t": time.time()},
+                )
+            req_id = uuid.uuid4().hex[:16]
+            payload = {
+                "type": "pb_single",
+                "req": req_id,
+                "idx": 0,
+                "chunk_ms": chunk_ms,
+                "pb_ver": 2,
+                "action": act,
+                "level": pb_level,
+                "anim": copy.deepcopy(anim),
+            }
+            logger.info(
+                "[/api/device_pb_anim] 发往 device_id=%s（/asr_chat WebSocket）文本帧: %s",
+                dev,
+                json.dumps(payload, ensure_ascii=False),
+            )
+            try:
+                n = await asr_chat_hub.send(dev, payload)
+            except Exception:
+                logger.exception(
+                    "[HTTP] /api/device_pb_anim 下发异常 device_id=%s", dev
+                )
+                n = 0
+            hint = None
+            channels: dict[str, int] = {}
+            if n == 0:
+                channels = _registry_channels(registry, dev)
+                hint = (
+                    "没有发往 WebSocket：该 device_id 当前无已连接的 /asr_chat，"
+                    "或连接已断开。pb 下发（表情/口型/场景/舵机）均需 ESP32 使用相同 device_id 登录 /asr_chat；"
+                    f"当前注册通道={channels or '无'}。"
+                )
+                logger.warning(
+                    "[HTTP] %s /api/device_pb_anim delivered=0 device_id=%s registry_channels=%s",
+                    method,
+                    dev,
+                    channels or None,
+                )
+            logger.info(
+                "[HTTP] %s /api/device_pb_anim peer=%s device_id=%s req=%s delivered=%d",
+                method,
+                peer,
+                dev,
+                req_id,
+                n,
+            )
+            return _json_resp(
+                200,
+                {
+                    "ok": n > 0,
+                    "device_id": dev,
+                    "req": req_id,
+                    "delivered": n,
+                    "hint": hint,
+                    "error": hint if n == 0 else None,
+                    "channels": channels if n == 0 else None,
+                    "t": time.time(),
+                },
+            )
+
+        if path_only == "/api/face_expr_scenes":
+            if method == "GET":
+                try:
+                    rows = load_face_expr_scenes_file(seed_if_missing=True)
+                except (OSError, json.JSONDecodeError, ValueError) as exc:
+                    return _json_resp(
+                        500,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                logger.info(
+                    "[HTTP] GET /api/face_expr_scenes peer=%s scenes=%d",
+                    peer,
+                    len(rows or []),
+                )
+                return _json_resp(
+                    200,
+                    {
+                        "ok": True,
+                        "config": rows or [],
+                        "exists": os.path.isfile(FACE_EXPR_SCENES_FILE),
+                        "file": os.path.basename(FACE_EXPR_SCENES_FILE),
+                        "t": time.time(),
+                    },
+                )
+            if method == "POST":
+                try:
+                    raw_body = (getattr(request, "body", None) or b"").decode("utf-8")
+                    body = json.loads(raw_body) if raw_body.strip() else []
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": "invalid JSON body", "t": time.time()},
+                    )
+                try:
+                    rows = normalize_face_expr_scenes(body)
+                    save_face_expr_scenes_file(rows)
+                except ValueError as exc:
+                    return _json_resp(
+                        400,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                except OSError as exc:
+                    return _json_resp(
+                        500,
+                        {"ok": False, "error": str(exc), "t": time.time()},
+                    )
+                return _json_resp(
+                    200,
+                    {
+                        "ok": True,
+                        "config": rows,
+                        "file": os.path.basename(FACE_EXPR_SCENES_FILE),
+                        "t": time.time(),
+                    },
+                )
+            return _json_resp(
+                405,
+                {"ok": False, "error": "method not allowed", "t": time.time()},
+            )
+
+        if path_only == "/api/device_pb_expr_scene":
+            if method != "GET":
+                return _json_resp(
+                    405,
+                    {"ok": False, "error": "method not allowed", "t": time.time()},
+                )
+            dev = (qargs.get("device_id") or "").strip()
+            scene_q = (qargs.get("scene") or qargs.get("name") or "").strip()
+            if not dev:
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": "missing device_id", "t": time.time()},
+                )
+            if not scene_q:
+                return _json_resp(
+                    400,
+                    {"ok": False, "error": "missing scene", "t": time.time()},
+                )
+            try:
+                rows = load_face_expr_scenes_file(seed_if_missing=False) or []
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                return _json_resp(
+                    500,
+                    {"ok": False, "error": str(exc), "t": time.time()},
+                )
+            ent = find_design_scene_by_name(rows, scene_q)
+            if ent is None:
+                valid = sorted({str(r.get("name") or "") for r in rows if r.get("name")})
+                return _json_resp(
+                    400,
+                    {
+                        "ok": False,
+                        "error": f"unknown scene: {scene_q!r}",
+                        "valid_scenes": valid,
+                        "t": time.time(),
+                    },
+                )
+            req_id = uuid.uuid4().hex[:16]
+            chain = design_frames_to_pb_chain(ent.get("frames") or [], runtime_req=req_id)
+            if not chain:
+                return _json_resp(
+                    500,
+                    {"ok": False, "error": "empty frames", "t": time.time()},
+                )
+            try:
+                n = await asr_chat_hub.send_pb_chain_ordered(dev, chain)
+            except Exception:
+                logger.exception(
+                    "[HTTP] /api/device_pb_expr_scene 下发异常 device_id=%s scene=%s",
+                    dev,
+                    scene_q,
+                )
+                n = 0
+            hint = None
+            channels: dict[str, int] = {}
+            if n == 0:
+                channels = _registry_channels(registry, dev)
+                hint = (
+                    "没有发往 WebSocket：该 device_id 当前无已连接的 /asr_chat。"
+                    f"当前注册通道={channels or '无'}。"
+                )
+            return _json_resp(
+                200,
+                {
+                    "ok": n > 0,
+                    "device_id": dev,
+                    "scene": ent.get("name"),
+                    "req": req_id,
+                    "frames": len(chain),
+                    "delivered": n,
+                    "hint": hint,
+                    "error": hint if n == 0 else None,
+                    "channels": channels if n == 0 else None,
                     "t": time.time(),
                 },
             )
